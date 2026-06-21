@@ -4,8 +4,8 @@ from PySide6.QtGui import QColor
 
 class ShowsTableModel(QAbstractTableModel):
     HEADERS = [
-        "Title", "Year", "Seasons", "Episodes\n(Have)",
-        "Episodes\n(Missing)", "Completion", "Rating", "Genres",
+        "Title", "Year", "Seasons",
+        "Have", "Missing", "Completion %", "Rating", "Genres",
     ]
 
     def __init__(self, rows: list[dict] | None = None) -> None:
@@ -35,18 +35,18 @@ class ShowsTableModel(QAbstractTableModel):
         if not index.isValid():
             return None
 
-        row = self._rows[index.row()]
-        col = index.column()
-        have = row.get("episodes_have", 0) or 0
-        total = row.get("episodes_total", 0) or 0
-        missing = row.get("episodes_missing", 0) or 0
-        pct = round((have / total * 100) if total > 0 else 0)
+        row  = self._rows[index.row()]
+        col  = index.column()
+        have = row.get("episodes_have") or 0
+        total = row.get("episodes_total") or 0
+        missing = row.get("episodes_missing") or 0
+        pct  = round(have / total * 100) if total > 0 else 0
 
         if role == Qt.DisplayRole:
             values = [
                 row.get("title", ""),
-                row.get("release_year", "") or "",
-                row.get("seasons_count", "") or "",
+                str(row.get("release_year", "") or ""),
+                str(row.get("seasons_count", "") or ""),
                 str(have),
                 str(missing),
                 f"{pct}%",
