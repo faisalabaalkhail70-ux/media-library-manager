@@ -2,15 +2,17 @@ import os
 from pathlib import Path
 from mlm.db.connection import get_connection
 
+
 class HealthService:
-    MOVIE_SMALL_BYTES = 50 * 1024 * 1024
+    MOVIE_SMALL_BYTES  = 50  * 1024 * 1024   # 50 MB
+    EPISODE_SMALL_BYTES = 20 * 1024 * 1024   # 20 MB
     VALID_EXTS = {".mkv", ".mp4", ".avi", ".m4v", ".mov"}
 
     def list_files_for_health_scan(self) -> list[dict]:
         with get_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT id, file_path, extension, file_size_bytes
+                SELECT id, file_path, extension, file_size_bytes, duration_seconds
                 FROM media_files
                 WHERE removed_at IS NULL
                 """
@@ -18,27 +20,33 @@ class HealthService:
         return [dict(r) for r in rows]
 
     def evaluate_file(self, row: dict) -> tuple[str, str]:
+        notes: list[str] = []
         path = Path(row["file_path"])
-        notes = []
 
-        if row["file_size_bytes"] == 0:
+        # ── حجم الملف ─────────────────────────────────────────────
+        size = row["file_size_bytes"] or 0
+        if size == 0:
             notes.append("0-byte file")
+        elif size < self.EPISODE_SMALL_BYTES:
+            notes.append("Unusually small file (< 20 MB)")
+        elif size < self.MOVIE_SMALL_BYTES:
+            # قد يكون حلقة مسلسل صغيرة — تحذير خفيف فقط
+            notes.append("Small file — may be an episode or short clip")
 
-        if row["file_size_bytes"] < self.MOVIE_SMALL_BYTES:
-            notes.append("Unusually small media file")
-
+        # ── الامتداد ──────────────────────────────────────────────
         if row["extension"].lower() not in self.VALID_EXTS:
-            notes.append("Unsupported extension")
+            notes.append(f"Unsupported extension: {row['extension']}")
 
-        srt_path = path.with_suffix(".srt")
-        nfo_path = path.with_suffix(".nfo")
+        # ── مدة غير موجودة (ffprobe لم يُشغَّل بعد) ──────────────
+        if not row.get("duration_seconds"):
+            notes.append("Duration not probed yet")
 
-        if not srt_path.exists():
-            notes.append("Missing subtitle sidecar")
-        if not nfo_path.exists():
-            notes.append("Missing NFO sidecar")
+        # ── الملف غير موجود على القرص ─────────────────────────────
+        if not path.exists():
+            notes.append("File not found on disk")
 
-        if any("0-byte" in n for n in notes):
+        # ── تحديد الحالة النهائية ─────────────────────────────────
+        if any("0-byte" in n or "not found" in n for n in notes):
             status = "error"
         elif notes:
             status = "warning"

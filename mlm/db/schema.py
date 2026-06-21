@@ -80,10 +80,11 @@ CREATE TABLE IF NOT EXISTS app_settings (
 CREATE TABLE IF NOT EXISTS api_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     provider TEXT NOT NULL,
-    cache_key TEXT NOT NULL UNIQUE,
+    cache_key TEXT NOT NULL,
     response_json TEXT NOT NULL,
     fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at TEXT
+    expires_at TEXT,
+    UNIQUE(provider, cache_key)
 );
 
 CREATE TABLE IF NOT EXISTS episodes (

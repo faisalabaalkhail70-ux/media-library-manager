@@ -1,0 +1,5 @@
+PySide6>=6.7
+requests>=2.31
+pandas>=2.2
+reportlab>=4.1
+openpyxl>=3.1

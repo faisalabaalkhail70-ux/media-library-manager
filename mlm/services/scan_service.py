@@ -3,6 +3,7 @@ from pathlib import Path
 from mlm.db.connection import get_connection
 from mlm.db.repositories.files_repo import FilesRepository
 
+
 class ScanService:
     def __init__(self) -> None:
         self.files_repo = FilesRepository()
@@ -24,6 +25,8 @@ class ScanService:
         *,
         files_seen: int,
         files_added: int,
+        files_updated: int = 0,
+        files_removed: int = 0,
         status: str = "completed",
         error_message: str | None = None,
     ) -> None:
@@ -31,7 +34,13 @@ class ScanService:
             conn.execute(
                 """
                 UPDATE scan_runs
-                SET finished_at = ?, status = ?, files_seen = ?, files_added = ?, error_message = ?
+                SET finished_at   = ?,
+                    status        = ?,
+                    files_seen    = ?,
+                    files_added   = ?,
+                    files_updated = ?,
+                    files_removed = ?,
+                    error_message = ?
                 WHERE id = ?
                 """,
                 (
@@ -39,6 +48,8 @@ class ScanService:
                     status,
                     files_seen,
                     files_added,
+                    files_updated,
+                    files_removed,
                     error_message,
                     scan_run_id,
                 ),
@@ -53,5 +64,7 @@ class ScanService:
             file_name=file_path.name,
             extension=file_path.suffix.lower(),
             file_size_bytes=stat.st_size,
-            modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+            modified_at=datetime.fromtimestamp(stat.st_mtime).isoformat(
+                timespec="seconds"
+            ),
         )

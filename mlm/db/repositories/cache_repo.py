@@ -1,6 +1,8 @@
 import json
 from datetime import datetime, timedelta
+
 from mlm.db.connection import get_connection
+
 
 class CacheRepository:
     def get_json(self, provider: str, cache_key: str) -> dict | None:
@@ -25,15 +27,23 @@ class CacheRepository:
 
     def set_json(self, provider: str, cache_key: str, payload: dict, ttl_hours: int = 168) -> None:
         expires_at = (datetime.now() + timedelta(hours=ttl_hours)).isoformat(timespec="seconds")
+        response_json = json.dumps(payload)
+
         with get_connection() as conn:
-            conn.execute(
+            cur = conn.execute(
                 """
-                INSERT INTO api_cache (provider, cache_key, response_json, expires_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(cache_key) DO UPDATE SET
-                    response_json=excluded.response_json,
-                    expires_at=excluded.expires_at,
-                    fetched_at=CURRENT_TIMESTAMP
+                UPDATE api_cache
+                SET response_json = ?, expires_at = ?, fetched_at = CURRENT_TIMESTAMP
+                WHERE provider = ? AND cache_key = ?
                 """,
-                (provider, cache_key, json.dumps(payload), expires_at),
+                (response_json, expires_at, provider, cache_key),
             )
+
+            if cur.rowcount == 0:
+                conn.execute(
+                    """
+                    INSERT INTO api_cache (provider, cache_key, response_json, expires_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (provider, cache_key, response_json, expires_at),
+                )

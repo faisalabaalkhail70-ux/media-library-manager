@@ -1,0 +1,861 @@
+===== main_window.py =====
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from mlm.ui.views.dashboard_view import DashboardView
+from mlm.ui.views.scanner_view import ScannerView
+from mlm.ui.views.library_view import LibraryView
+from mlm.ui.views.movies_view import MoviesView
+from mlm.ui.views.shows_view import ShowsView
+from mlm.ui.views.duplicates_view import DuplicatesView
+from mlm.ui.views.rename_view import RenameView
+from mlm.ui.views.reports_view import ReportsView
+from mlm.ui.views.settings_view import SettingsView
+
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Media Library Manager")
+        self.resize(1400, 850)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(230)
+
+        side_layout = QVBoxLayout(sidebar)
+        side_layout.setContentsMargins(12, 20, 12, 20)
+        side_layout.setSpacing(8)
+
+        logo = QLabel("Media Library\nManager")
+        logo.setObjectName("h1")
+        logo.setAlignment(Qt.AlignCenter)
+        side_layout.addWidget(logo)
+
+        self.stack = QStackedWidget()
+
+        self.views = [
+            ("Dashboard", DashboardView()),
+            ("Scanner", ScannerView()),
+            ("Library", LibraryView()),
+            ("Movies", MoviesView()),
+            ("Shows", ShowsView()),
+            ("Duplicates", DuplicatesView()),
+            ("Rename", RenameView()),
+            ("Reports", ReportsView()),
+            ("Settings", SettingsView()),
+        ]
+
+        for _, view in self.views:
+            self.stack.addWidget(view)
+
+        self.nav_buttons = []
+        for index, (label, _) in enumerate(self.views):
+            btn = QPushButton(label)
+            btn.setObjectName("sidebar_btn")
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, i=index: self.switch_view(i))
+            side_layout.addWidget(btn)
+            self.nav_buttons.append(btn)
+
+        side_layout.addStretch()
+
+        root.addWidget(sidebar)
+        root.addWidget(self.stack, 1)
+
+        self.switch_view(0)
+
+    def switch_view(self, index: int) -> None:
+        self.stack.setCurrentIndex(index)
+
+        for i, btn in enumerate(self.nav_buttons):
+            btn.setChecked(i == index)
+
+        current = self.stack.currentWidget()
+
+        if hasattr(current, "load_rows"):
+            current.load_rows()
+        elif hasattr(current, "refresh"):
+            current.refresh()
+        elif hasattr(current, "load_settings"):
+            current.load_settings()
+===== dashboard_view.py =====
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
+    QTableWidget, QTableWidgetItem, QFrame, QGridLayout
+)
+
+from mlm.services.dashboard_service import DashboardService
+
+
+class StatCard(QFrame):
+    def __init__(self, title: str, value: str = "--") -> None:
+        super().__init__()
+        self.setObjectName("stat_card")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(6)
+
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("muted")
+
+        self.value_label = QLabel(value)
+        self.value_label.setObjectName("stat_value")
+
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.value_label)
+
+    def set_value(self, value: str) -> None:
+        self.value_label.setText(value)
+
+
+class InfoCard(QFrame):
+    def __init__(self, title: str) -> None:
+        super().__init__()
+        self.setObjectName("panel_card")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        heading = QLabel(title)
+        heading.setObjectName("panel_title")
+        layout.addWidget(heading)
+
+        self.body = QLabel("")
+        self.body.setWordWrap(True)
+        layout.addWidget(self.body)
+
+    def set_text(self, text: str) -> None:
+        self.body.setText(text)
+
+
+class DashboardView(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.service = DashboardService()
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        title = QLabel("Dashboard")
+        title.setObjectName("h1")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Statistics, formats, and recent library activity.")
+        subtitle.setObjectName("muted")
+        layout.addWidget(subtitle)
+
+        toolbar = QHBoxLayout()
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setObjectName("primary")
+        self.refresh_btn.clicked.connect(self.load_rows)
+        toolbar.addWidget(self.refresh_btn)
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        stats_grid = QGridLayout()
+        stats_grid.setSpacing(10)
+
+        self.files_card = StatCard("Total Files")
+        self.movies_card = StatCard("Movies")
+        self.shows_card = StatCard("Shows")
+        self.episodes_card = StatCard("Episodes")
+        self.storage_card = StatCard("Storage")
+        self.watchtime_card = StatCard("Watch Time")
+
+        stats_grid.addWidget(self.files_card, 0, 0)
+        stats_grid.addWidget(self.movies_card, 0, 1)
+        stats_grid.addWidget(self.shows_card, 0, 2)
+        stats_grid.addWidget(self.episodes_card, 1, 0)
+        stats_grid.addWidget(self.storage_card, 1, 1)
+        stats_grid.addWidget(self.watchtime_card, 1, 2)
+
+        layout.addLayout(stats_grid)
+
+        info_row = QHBoxLayout()
+        info_row.setSpacing(10)
+
+        self.resolution_card = InfoCard("Top Resolutions")
+        self.codec_card = InfoCard("Top Codecs")
+
+        info_row.addWidget(self.resolution_card, 1)
+        info_row.addWidget(self.codec_card, 1)
+
+        layout.addLayout(info_row)
+
+        recent_title = QLabel("Recent Additions")
+        recent_title.setObjectName("panel_title")
+        layout.addWidget(recent_title)
+
+        self.recent_table = QTableWidget(0, 3)
+        self.recent_table.setHorizontalHeaderLabels(["File Name", "Path", "Discovered"])
+        self.recent_table.horizontalHeader().setStretchLastSection(True)
+        self.recent_table.verticalHeader().setVisible(False)
+        self.recent_table.setAlternatingRowColors(True)
+        layout.addWidget(self.recent_table)
+
+        self.status_label = QLabel("Ready.")
+        self.status_label.setObjectName("muted")
+        layout.addWidget(self.status_label)
+
+        self.load_rows()
+
+    def load_rows(self) -> None:
+        overview = self.service.library_overview()
+        resolutions = self.service.resolution_breakdown()
+        codecs = self.service.codec_breakdown()
+        recent = self.service.recent_additions()
+
+        self.files_card.set_value(str(overview.get("total_files", 0)))
+        self.movies_card.set_value(str(overview.get("total_movies", 0)))
+        self.shows_card.set_value(str(overview.get("total_shows", 0)))
+        self.episodes_card.set_value(str(overview.get("total_episodes", 0)))
+        self.storage_card.set_value(f'{overview.get("storage_gb", 0)} GB')
+        self.watchtime_card.set_value(f'{overview.get("watch_hours", 0)} h')
+
+        resolution_text = "\n".join(
+            f'• {row["resolution"]}: {row["count"]}'
+            for row in resolutions[:6]
+        ) or "No resolution data."
+        self.resolution_card.set_text(resolution_text)
+
+        codec_text = "\n".join(
+            f'• {row["video_codec"]}: {row["count"]}'
+            for row in codecs[:6]
+        ) or "No codec data."
+        self.codec_card.set_text(codec_text)
+
+        self.recent_table.setRowCount(len(recent))
+        for row_index, row in enumerate(recent):
+            self.recent_table.setItem(row_index, 0, QTableWidgetItem(str(row.get("file_name", ""))))
+            self.recent_table.setItem(row_index, 1, QTableWidgetItem(str(row.get("file_path", ""))))
+            self.recent_table.setItem(row_index, 2, QTableWidgetItem(str(row.get("discovered_at", ""))))
+
+        self.status_label.setText(f'Loaded dashboard data for {overview.get("total_files", 0)} files.')
+===== duplicates_view.py =====
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QLabel, QPushButton,
+    QTableView, QHBoxLayout, QMessageBox
+)
+
+from mlm.db.repositories.duplicates_repo import DuplicatesRepository
+from mlm.ui.models.duplicates_model import DuplicatesModel
+from mlm.workers.duplicate_worker import DuplicateWorker
+
+
+class DuplicatesView(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.repo = DuplicatesRepository()
+        self.model = DuplicatesModel([])
+        self.worker = None
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel("Duplicates")
+        title.setObjectName("h1")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Find exact and possible duplicate media files.")
+        subtitle.setObjectName("muted")
+        layout.addWidget(subtitle)
+
+        toolbar = QHBoxLayout()
+
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.load_rows)
+        toolbar.addWidget(self.refresh_btn)
+
+        self.find_btn = QPushButton("Find Duplicates")
+        self.find_btn.setObjectName("primary")
+        self.find_btn.clicked.connect(self.find_duplicates)
+        toolbar.addWidget(self.find_btn)
+
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        self.status_label = QLabel("Ready.")
+        self.status_label.setObjectName("muted")
+        layout.addWidget(self.status_label)
+
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+        self.load_rows()
+
+    def load_rows(self) -> None:
+        rows = self.repo.fetch_duplicate_rows()
+        self.model.set_rows(rows)
+        self.status_label.setText(f"Loaded {len(rows)} duplicate rows.")
+
+    def find_duplicates(self) -> None:
+        if self.worker and self.worker.isRunning():
+            QMessageBox.information(self, "Scan in progress", "A duplicate scan is already running.")
+            return
+
+        self.refresh_btn.setEnabled(False)
+        self.find_btn.setEnabled(False)
+        self.status_label.setText("Scanning for duplicates...")
+
+        self.worker = DuplicateWorker()
+        self.worker.finished_build.connect(self.on_finished)
+        self.worker.failed.connect(self.on_failed)
+        self.worker.start()
+
+    def on_finished(self, result: dict) -> None:
+        self.refresh_btn.setEnabled(True)
+        self.find_btn.setEnabled(True)
+        self.load_rows()
+
+        self.status_label.setText(
+            f'Duplicate scan finished. Exact groups: {result["exact_groups"]}, '
+            f'Possible groups: {result["possible_groups"]}'
+        )
+
+        QMessageBox.information(
+            self,
+            "Duplicate scan complete",
+            f'Exact groups: {result["exact_groups"]}\nPossible groups: {result["possible_groups"]}'
+        )
+
+    def on_failed(self, message: str) -> None:
+        self.refresh_btn.setEnabled(True)
+        self.find_btn.setEnabled(True)
+        self.status_label.setText("Duplicate scan failed.")
+        QMessageBox.critical(self, "Duplicate scan failed", message)
+===== rename_view.py =====
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton,
+    QLineEdit, QTableView, QMessageBox
+)
+
+from mlm.services.rename_service import RenameService
+from mlm.ui.models.rename_preview_model import RenamePreviewModel
+from mlm.workers.rename_worker import RenameWorker
+from mlm.workers.undo_worker import UndoWorker
+
+
+class RenameView(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rename_service = RenameService()
+        self.model = RenamePreviewModel([])
+        self.worker = None
+        self.undo_worker = None
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel("Rename")
+        title.setObjectName("h1")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Preview and apply renames using your configured template.")
+        subtitle.setObjectName("muted")
+        layout.addWidget(subtitle)
+
+        toolbar = QHBoxLayout()
+
+        self.template_input = QLineEdit()
+        self.template_input.setPlaceholderText("{Title} ({Year}){Ext}")
+        toolbar.addWidget(self.template_input)
+
+        self.preview_btn = QPushButton("Preview")
+        self.preview_btn.clicked.connect(self.preview)
+        toolbar.addWidget(self.preview_btn)
+
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setObjectName("primary")
+        self.apply_btn.clicked.connect(self.apply_changes)
+        toolbar.addWidget(self.apply_btn)
+
+        self.undo_btn = QPushButton("Undo Latest")
+        self.undo_btn.clicked.connect(self.undo_latest)
+        toolbar.addWidget(self.undo_btn)
+
+        layout.addLayout(toolbar)
+
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+        self.preview()
+
+    def preview(self) -> None:
+        rows = self.rename_service.build_preview(self.template_input.text().strip())
+        self.model.set_rows(rows)
+
+    def apply_changes(self) -> None:
+        rows = [r for r in self.model.rows() if r["status"] == "valid"]
+        if not rows:
+            QMessageBox.information(self, "Nothing to apply", "No valid rename operations.")
+            return
+
+        self.preview_btn.setEnabled(False)
+        self.apply_btn.setEnabled(False)
+        self.undo_btn.setEnabled(False)
+
+        self.worker = RenameWorker(rows)
+        self.worker.finished_apply.connect(self.on_applied)
+        self.worker.failed.connect(self.on_failed)
+        self.worker.start()
+
+    def on_applied(self, result: dict) -> None:
+        self.preview_btn.setEnabled(True)
+        self.apply_btn.setEnabled(True)
+        self.undo_btn.setEnabled(True)
+
+        QMessageBox.information(
+            self,
+            "Rename complete",
+            f'Success: {result["success"]}, Failed: {result["failed"]}'
+        )
+        self.preview()
+
+    def undo_latest(self) -> None:
+        self.preview_btn.setEnabled(False)
+        self.apply_btn.setEnabled(False)
+        self.undo_btn.setEnabled(False)
+
+        self.undo_worker = UndoWorker(limit=20)
+        self.undo_worker.finished_undo.connect(self.on_undo_complete)
+        self.undo_worker.failed.connect(self.on_failed)
+        self.undo_worker.start()
+
+    def on_undo_complete(self, result: dict) -> None:
+        self.preview_btn.setEnabled(True)
+        self.apply_btn.setEnabled(True)
+        self.undo_btn.setEnabled(True)
+
+        QMessageBox.information(
+            self,
+            "Undo complete",
+            f'Undone: {result["undone"]}, Failed: {result["failed"]}'
+        )
+        self.preview()
+
+    def on_failed(self, message: str) -> None:
+        self.preview_btn.setEnabled(True)
+        self.apply_btn.setEnabled(True)
+        self.undo_btn.setEnabled(True)
+        QMessageBox.critical(self, "Rename failed", message)
+===== reports_view.py =====
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
+    QComboBox, QMessageBox
+)
+
+from mlm.services.export_service import ExportService
+
+
+class ReportsView(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.service = ExportService()
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel("Reports")
+        title.setObjectName("h1")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Export library, missing episodes, or duplicates reports.")
+        subtitle.setObjectName("muted")
+        layout.addWidget(subtitle)
+
+        row = QHBoxLayout()
+
+        self.report_combo = QComboBox()
+        self.report_combo.addItems(["library", "missing_episodes", "duplicates"])
+        row.addWidget(self.report_combo)
+
+        self.csv_btn = QPushButton("Export CSV")
+        self.csv_btn.clicked.connect(self.export_csv)
+        row.addWidget(self.csv_btn)
+
+        self.xlsx_btn = QPushButton("Export Excel")
+        self.xlsx_btn.clicked.connect(self.export_excel)
+        row.addWidget(self.xlsx_btn)
+
+        self.pdf_btn = QPushButton("Export PDF")
+        self.pdf_btn.setObjectName("primary")
+        self.pdf_btn.clicked.connect(self.export_pdf)
+        row.addWidget(self.pdf_btn)
+
+        row.addStretch()
+        layout.addLayout(row)
+
+        self.status_label = QLabel("Ready.")
+        self.status_label.setObjectName("muted")
+        layout.addWidget(self.status_label)
+
+        layout.addStretch()
+
+    def _set_busy(self, busy: bool) -> None:
+        self.report_combo.setEnabled(not busy)
+        self.csv_btn.setEnabled(not busy)
+        self.xlsx_btn.setEnabled(not busy)
+        self.pdf_btn.setEnabled(not busy)
+
+    def export_csv(self) -> None:
+        report_name = self.report_combo.currentText()
+        try:
+            self._set_busy(True)
+            self.status_label.setText(f"Exporting {report_name}.csv ...")
+            path = self.service.export_csv(report_name)
+            self.status_label.setText(f"Exported: {path}")
+            QMessageBox.information(self, "Export complete", f"CSV created:\n{path}")
+        except Exception as exc:
+            self.status_label.setText("CSV export failed.")
+            QMessageBox.critical(self, "Export failed", str(exc))
+        finally:
+            self._set_busy(False)
+
+    def export_excel(self) -> None:
+        report_name = self.report_combo.currentText()
+        try:
+            self._set_busy(True)
+            self.status_label.setText(f"Exporting {report_name}.xlsx ...")
+            path = self.service.export_excel(report_name)
+            self.status_label.setText(f"Exported: {path}")
+            QMessageBox.information(self, "Export complete", f"Excel file created:\n{path}")
+        except Exception as exc:
+            self.status_label.setText("Excel export failed.")
+            QMessageBox.critical(self, "Export failed", str(exc))
+        finally:
+            self._set_busy(False)
+
+    def export_pdf(self) -> None:
+        report_name = self.report_combo.currentText()
+        try:
+            self._set_busy(True)
+            self.status_label.setText(f"Exporting {report_name}.pdf ...")
+            path = self.service.export_pdf(report_name)
+            self.status_label.setText(f"Exported: {path}")
+            QMessageBox.information(self, "Export complete", f"PDF created:\n{path}")
+        except Exception as exc:
+            self.status_label.setText("PDF export failed.")
+            QMessageBox.critical(self, "Export failed", str(exc))
+        finally:
+            self._set_busy(False)
+===== shows_view.py =====
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QSplitter,
+    QTableView,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from mlm.db.connection import get_connection
+from mlm.db.repositories.episodes_repo import EpisodesRepository
+from mlm.services.episode_service import EpisodeService
+from mlm.ui.models.missing_episodes_model import MissingEpisodesModel
+
+
+class ShowsView(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+        self.repo = EpisodesRepository()
+        self.service = EpisodeService()
+        self.model = MissingEpisodesModel([])
+        self._show_rows: list[dict] = []
+        self._all_missing_rows: list[dict] = []
+        self._selected_show_id: int | None = None
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel("Shows")
+        title.setObjectName("h1")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Track series, review missing episodes, and sync show data with TMDB.")
+        subtitle.setObjectName("muted")
+        layout.addWidget(subtitle)
+
+        toolbar = QHBoxLayout()
+
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.load_rows)
+        toolbar.addWidget(self.refresh_btn)
+
+        self.check_btn = QPushButton("Check Missing Episodes")
+        self.check_btn.setObjectName("primary")
+        self.check_btn.clicked.connect(self.check_missing)
+        toolbar.addWidget(self.check_btn)
+
+        toolbar.addStretch()
+        layout.addLayout(toolbar)
+
+        self.status_label = QLabel("Ready.")
+        self.status_label.setObjectName("muted")
+        layout.addWidget(self.status_label)
+
+        splitter = QSplitter(Qt.Vertical)
+        layout.addWidget(splitter)
+
+        top_widget = QWidget()
+        top_layout = QVBoxLayout(top_widget)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+
+        shows_title = QLabel("Tracked Series")
+        shows_title.setObjectName("h1")
+        top_layout.addWidget(shows_title)
+
+        self.show_summary_label = QLabel("No show selected.")
+        self.show_summary_label.setObjectName("muted")
+        top_layout.addWidget(self.show_summary_label)
+
+        self.shows_table = QTableWidget(0, 6)
+        self.shows_table.setHorizontalHeaderLabels(
+            ["Series", "Year", "TMDB ID", "Present", "Missing", "Total"]
+        )
+        self.shows_table.setAlternatingRowColors(True)
+        self.shows_table.verticalHeader().setVisible(False)
+        self.shows_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.shows_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.shows_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.shows_table.setSortingEnabled(False)
+        self.shows_table.horizontalHeader().setStretchLastSection(True)
+        self.shows_table.itemSelectionChanged.connect(self.on_show_selection_changed)
+        top_layout.addWidget(self.shows_table)
+
+        bottom_widget = QWidget()
+        bottom_layout = QVBoxLayout(bottom_widget)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+
+        missing_title = QLabel("Missing Episodes")
+        missing_title.setObjectName("h1")
+        bottom_layout.addWidget(missing_title)
+
+        missing_toolbar = QHBoxLayout()
+        self.missing_label = QLabel("All missing episodes across tracked series.")
+        self.missing_label.setObjectName("muted")
+        missing_toolbar.addWidget(self.missing_label)
+
+        missing_toolbar.addStretch()
+
+        self.show_all_btn = QPushButton("Show All")
+        self.show_all_btn.clicked.connect(self.show_all_missing_rows)
+        missing_toolbar.addWidget(self.show_all_btn)
+
+        bottom_layout.addLayout(missing_toolbar)
+
+        self.table = QTableView()
+        self.table.setModel(self.model)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        bottom_layout.addWidget(self.table)
+
+        splitter.addWidget(top_widget)
+        splitter.addWidget(bottom_widget)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+
+        self.load_rows()
+
+    def _fetch_show_rows(self) -> list[dict]:
+        with get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    me.id AS entity_id,
+                    me.title AS show_title,
+                    me.release_year,
+                    me.tmdb_id,
+                    COUNT(CASE WHEN ep.is_missing = 0 AND ep.media_file_id IS NOT NULL THEN 1 END) AS present_episodes,
+                    COUNT(CASE WHEN ep.is_missing = 1 THEN 1 END) AS missing_episodes,
+                    COUNT(ep.id) AS total_episode_rows
+                FROM media_entities me
+                LEFT JOIN episodes ep ON ep.entity_id = me.id
+                WHERE me.media_type = 'show'
+                GROUP BY me.id, me.title, me.release_year, me.tmdb_id
+                ORDER BY me.title COLLATE NOCASE
+                """
+            ).fetchall()
+
+        return [dict(r) for r in rows]
+
+    def _fetch_all_missing_rows(self) -> list[dict]:
+        return self.repo.fetch_all_missing_rows()
+
+    def _filter_missing_rows_for_show(self, entity_id: int) -> list[dict]:
+        return [row for row in self._all_missing_rows if row.get("entity_id") == entity_id]
+
+    def load_rows(self) -> None:
+        self._show_rows = self._fetch_show_rows()
+        self._all_missing_rows = self._fetch_all_missing_rows()
+        self._selected_show_id = None
+
+        self.populate_shows_table(self._show_rows)
+        self.model.set_rows(self._all_missing_rows)
+
+        self.status_label.setText(
+            f"Loaded {len(self._show_rows)} shows and {len(self._all_missing_rows)} missing episode rows."
+        )
+
+        if self._show_rows:
+            self.shows_table.selectRow(0)
+            self.on_show_selection_changed()
+        else:
+            self.show_summary_label.setText("No tracked series found.")
+            self.missing_label.setText("No missing episode rows loaded.")
+
+    def populate_shows_table(self, rows: list[dict]) -> None:
+        self.shows_table.setRowCount(len(rows))
+
+        for row_index, row in enumerate(rows):
+            values = [
+                row.get("show_title") or "Unknown",
+                str(row.get("release_year") or ""),
+                str(row.get("tmdb_id") or ""),
+                str(row.get("present_episodes") or 0),
+                str(row.get("missing_episodes") or 0),
+                str(row.get("total_episode_rows") or 0),
+            ]
+
+            for col_index, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col_index != 0:
+                    item.setTextAlignment(Qt.AlignCenter)
+                item.setData(Qt.UserRole, row)
+                self.shows_table.setItem(row_index, col_index, item)
+
+        self.shows_table.resizeColumnsToContents()
+
+    def on_show_selection_changed(self) -> None:
+        row_index = self.shows_table.currentRow()
+        if row_index < 0 or row_index >= len(self._show_rows):
+            self._selected_show_id = None
+            self.show_summary_label.setText("No show selected.")
+            self.missing_label.setText("All missing episodes across tracked series.")
+            self.model.set_rows(self._all_missing_rows)
+            return
+
+        row = self._show_rows[row_index]
+        self._selected_show_id = row.get("entity_id")
+
+        show_title = row.get("show_title") or "Unknown"
+        year = row.get("release_year") or "—"
+        tmdb_id = row.get("tmdb_id") or "—"
+        present = row.get("present_episodes") or 0
+        missing = row.get("missing_episodes") or 0
+        total = row.get("total_episode_rows") or 0
+
+        self.show_summary_label.setText(
+            f"Selected series: {show_title} | Year: {year} | TMDB ID: {tmdb_id} | "
+            f"Present: {present} | Missing: {missing} | Total tracked rows: {total}"
+        )
+
+        filtered_rows = self._filter_missing_rows_for_show(self._selected_show_id)
+        self.model.set_rows(filtered_rows)
+        self.missing_label.setText(
+            f"Missing episodes currently listed for: {show_title} ({len(filtered_rows)} rows)"
+        )
+
+    def show_all_missing_rows(self) -> None:
+        self._selected_show_id = None
+        self.shows_table.clearSelection()
+        self.model.set_rows(self._all_missing_rows)
+        self.show_summary_label.setText("No show selected.")
+        self.missing_label.setText(
+            f"All missing episodes across tracked series ({len(self._all_missing_rows)} rows)"
+        )
+
+    def check_missing(self) -> None:
+        try:
+            self.refresh_btn.setEnabled(False)
+            self.check_btn.setEnabled(False)
+            self.status_label.setText("Checking shows against TMDB...")
+
+            results = self.service.check_all_shows()
+            total_missing = sum(r.get("missing_count", 0) for r in results)
+            checked = len(results)
+            show_names = [r.get("show_title") for r in results if r.get("show_title")]
+
+            self.load_rows()
+
+            self.status_label.setText(
+                f"Missing episode check finished. Shows checked: {checked}, Missing episodes found: {total_missing}"
+            )
+
+            summary = (
+                f"Shows checked: {checked}\n"
+                f"Missing episodes found: {total_missing}\n\n"
+                f"Series checked:\n" + ("\n".join(show_names[:15]) if show_names else "None")
+            )
+
+            if len(show_names) > 15:
+                summary += "\n..."
+
+            QMessageBox.information(self, "Check complete", summary)
+        except Exception as exc:
+            self.status_label.setText("Missing episode check failed.")
+            QMessageBox.critical(self, "Check failed", str(exc))
+        finally:
+            self.refresh_btn.setEnabled(True)
+            self.check_btn.setEnabled(True)
+===== show_detail_view.py =====
+from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+
+class ShowDetailView(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
+
+        layout = QVBoxLayout(self)
+
+        title = QLabel("Show Details")
+        title.setObjectName("h1")
+        layout.addWidget(title)
+
+        self.summary_label = QLabel("Select a show to inspect more details.")
+        self.summary_label.setObjectName("muted")
+        layout.addWidget(self.summary_label)
+
+        layout.addStretch()
+
+    def set_show(self, row: dict) -> None:
+        show_title = row.get("show_title") or "Unknown"
+        release_year = row.get("release_year") or "—"
+        tmdb_id = row.get("tmdb_id") or "—"
+        present = row.get("present_episodes") or 0
+        missing = row.get("missing_episodes") or 0
+        total = row.get("total_episode_rows") or 0
+
+        self.summary_label.setText(
+            f"{show_title} | Year: {release_year} | TMDB ID: {tmdb_id} | "
+            f"Present: {present} | Missing: {missing} | Total tracked rows: {total}"
+        )

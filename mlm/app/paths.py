@@ -1,6 +1,6 @@
 from pathlib import Path
 
-APP_NAME = "Media Library Manager"
+APP_NAME = "Atlas"
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT_DIR / "data"

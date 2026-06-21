@@ -1,5 +1,6 @@
 from mlm.db.connection import get_connection
 
+
 class EpisodesRepository:
     def list_show_entities(self) -> list[dict]:
         with get_connection() as conn:
@@ -44,18 +45,28 @@ class EpisodesRepository:
                 VALUES (?, NULL, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(entity_id, season_number, episode_number)
                 DO UPDATE SET
-                    episode_title=excluded.episode_title,
-                    air_date=excluded.air_date,
-                    tmdb_episode_id=excluded.tmdb_episode_id,
-                    is_missing=1
+                    episode_title = excluded.episode_title,
+                    air_date = excluded.air_date,
+                    tmdb_episode_id = excluded.tmdb_episode_id,
+                    is_missing = 1
                 """,
-                (entity_id, season_number, episode_number, episode_title, air_date, tmdb_episode_id),
+                (
+                    entity_id,
+                    season_number,
+                    episode_number,
+                    episode_title,
+                    air_date,
+                    tmdb_episode_id,
+                ),
             )
 
     def clear_missing_for_entity(self, entity_id: int) -> None:
         with get_connection() as conn:
             conn.execute(
-                "DELETE FROM episodes WHERE entity_id = ? AND is_missing = 1",
+                """
+                DELETE FROM episodes
+                WHERE entity_id = ? AND is_missing = 1
+                """,
                 (entity_id,),
             )
 
@@ -63,11 +74,39 @@ class EpisodesRepository:
         with get_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT season_number, episode_number, episode_title, air_date, is_missing
-                FROM episodes
-                WHERE entity_id = ? AND is_missing = 1
-                ORDER BY season_number, episode_number
+                SELECT
+                    ep.entity_id,
+                    me.title AS show_title,
+                    ep.season_number,
+                    ep.episode_number,
+                    ep.episode_title,
+                    ep.air_date,
+                    ep.is_missing
+                FROM episodes ep
+                JOIN media_entities me ON me.id = ep.entity_id
+                WHERE ep.entity_id = ? AND ep.is_missing = 1
+                ORDER BY ep.season_number, ep.episode_number
                 """,
                 (entity_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def fetch_all_missing_rows(self) -> list[dict]:
+        with get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    ep.entity_id,
+                    me.title AS show_title,
+                    ep.season_number,
+                    ep.episode_number,
+                    ep.episode_title,
+                    ep.air_date,
+                    ep.is_missing
+                FROM episodes ep
+                JOIN media_entities me ON me.id = ep.entity_id
+                WHERE ep.is_missing = 1
+                ORDER BY me.title, ep.season_number, ep.episode_number
+                """
             ).fetchall()
         return [dict(r) for r in rows]

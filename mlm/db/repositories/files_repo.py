@@ -1,5 +1,6 @@
 from mlm.db.connection import get_connection
 
+
 class FilesRepository:
     def upsert_file(
         self,
@@ -38,6 +39,48 @@ class FilesRepository:
                     modified_at,
                 ),
             )
+
+    def save_hashes(
+        self,
+        *,
+        file_path: str,
+        partial_hash: str | None = None,
+        full_hash: str | None = None,
+        algo: str = "md5",
+    ) -> None:
+        with get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE media_files
+                SET partial_hash = COALESCE(?, partial_hash),
+                    full_hash    = COALESCE(?, full_hash),
+                    hash_algo    = ?
+                WHERE file_path = ?
+                """,
+                (partial_hash, full_hash, algo, file_path),
+            )
+
+    def mark_removed(self, file_path: str, removed_at: str) -> None:
+        with get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE media_files
+                SET removed_at = ?
+                WHERE file_path = ? AND removed_at IS NULL
+                """,
+                (removed_at, file_path),
+            )
+
+    def get_known_paths_for_directory(self, directory_id: int) -> set[str]:
+        with get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT file_path FROM media_files
+                WHERE directory_id = ? AND removed_at IS NULL
+                """,
+                (directory_id,),
+            ).fetchall()
+        return {row["file_path"] for row in rows}
 
     def fetch_library_rows(self, limit: int = 5000) -> list[dict]:
         with get_connection() as conn:
