@@ -1,6 +1,14 @@
+"""Database schema definition and initialisation."""
+import logging
 from mlm.db.connection import get_connection
 
+log = logging.getLogger(__name__)
+
 SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS directories (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     path TEXT NOT NULL UNIQUE,
@@ -132,8 +140,30 @@ CREATE TABLE IF NOT EXISTS action_ledger (
     undone_at TEXT,
     FOREIGN KEY(media_file_id) REFERENCES media_files(id)
 );
+
+-- Performance indexes
+CREATE INDEX IF NOT EXISTS idx_files_entity     ON media_files(entity_id);
+CREATE INDEX IF NOT EXISTS idx_files_removed    ON media_files(removed_at);
+CREATE INDEX IF NOT EXISTS idx_files_directory  ON media_files(directory_id);
+CREATE INDEX IF NOT EXISTS idx_files_partial_h  ON media_files(partial_hash);
+CREATE INDEX IF NOT EXISTS idx_files_full_h     ON media_files(full_hash);
+CREATE INDEX IF NOT EXISTS idx_cache_provider   ON api_cache(provider, cache_key);
+CREATE INDEX IF NOT EXISTS idx_episodes_entity  ON episodes(entity_id);
+CREATE INDEX IF NOT EXISTS idx_episodes_missing ON episodes(is_missing);
 """
 
+CURRENT_VERSION = 2
+
+
 def init_database() -> None:
+    """Initialise schema and apply any outstanding migrations."""
     with get_connection() as conn:
         conn.executescript(SCHEMA_SQL)
+        row = conn.execute("SELECT version FROM schema_version").fetchone()
+        existing = row["version"] if row else 0
+        if existing < CURRENT_VERSION:
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_version(version) VALUES (?)",
+                (CURRENT_VERSION,),
+            )
+            log.info("Schema upgraded from version %d to %d", existing, CURRENT_VERSION)
