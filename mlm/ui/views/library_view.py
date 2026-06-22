@@ -21,12 +21,13 @@ class LibraryView(QWidget):
         self.metadata_worker = None
         self.probe_worker = None
         self.health_worker = None
+        self._probe_errors: list[tuple[str, str]] = []   # (path, reason)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(14)
 
-        # ── Header ───────────────────────────────────────────────────
+        # ── Header ───────────────────────────────────────────────
         header = QHBoxLayout()
         title_wrap = QVBoxLayout()
         title_wrap.setSpacing(2)
@@ -65,7 +66,6 @@ class LibraryView(QWidget):
         self.health_btn = QPushButton("Run Health Scan")
         self.health_btn.clicked.connect(self.run_health_scan)
 
-        # Bulk re-match button (force-re-matches ALL already-matched files)
         self.rematch_btn = QPushButton("\U0001f504 Bulk Re-Match All")
         self.rematch_btn.setToolTip(
             "Force re-fetch metadata from TMDB for every entity in the library, "
@@ -103,7 +103,7 @@ class LibraryView(QWidget):
         summary_layout.addStretch()
         root.addWidget(summary_panel)
 
-        # ── Table ───────────────────────────────────────────────────
+        # ── Table ───────────────────────────────────────────────
         table_panel = QFrame()
         table_panel.setObjectName("card")
         table_layout = QVBoxLayout(table_panel)
@@ -121,21 +121,22 @@ class LibraryView(QWidget):
 
         self.load_rows()
 
-    # ── Data ─────────────────────────────────────────────────────
+    # ── Data ───────────────────────────────────────────────
 
     def load_rows(self) -> None:
         rows = self.repo.fetch_library_rows()
         self.model.set_rows(rows)
         self.count_label.setText(f"{len(rows)} rows loaded")
 
-    # ── Actions ─────────────────────────────────────────────────
+    # ── Actions ───────────────────────────────────────────────
 
     def run_metadata_match(self) -> None:
         if self.metadata_worker and self.metadata_worker.isRunning():
             self.metadata_worker.stop()
             self.status_label.setText("Stopping metadata match...")
             return
-        self.metadata_worker = MetadataWorker(limit=300)
+        # limit=0 → process ALL unmatched files in one run
+        self.metadata_worker = MetadataWorker(limit=0)
         self.metadata_worker.progress.connect(self.on_metadata_progress)
         self.metadata_worker.finished_batch.connect(self.on_metadata_finished)
         self.metadata_worker.failed.connect(self.on_worker_failed)
@@ -149,8 +150,11 @@ class LibraryView(QWidget):
             self.probe_worker.stop()
             self.status_label.setText("Stopping ffprobe enrich...")
             return
-        self.probe_worker = ProbeWorker(limit=300)
+        self._probe_errors = []
+        # limit=0 → process ALL files needing probe in one run
+        self.probe_worker = ProbeWorker(limit=0)
         self.probe_worker.progress.connect(self.on_probe_progress)
+        self.probe_worker.file_error.connect(self.on_probe_file_error)
         self.probe_worker.finished_batch.connect(self.on_probe_finished)
         self.probe_worker.failed.connect(self.on_worker_failed)
         self.progress.show()
@@ -174,7 +178,6 @@ class LibraryView(QWidget):
         self.health_worker.start()
 
     def run_bulk_rematch(self) -> None:
-        """Force-re-match every entity already in the DB against TMDB."""
         if self.metadata_worker and self.metadata_worker.isRunning():
             QMessageBox.information(self, "Busy", "A metadata operation is already running.")
             return
@@ -187,7 +190,6 @@ class LibraryView(QWidget):
         if reply != QMessageBox.Yes:
             return
 
-        # MetadataWorker with limit=0 means ‘process everything, including already-matched’
         self.metadata_worker = MetadataWorker(limit=0, force=True)
         self.metadata_worker.progress.connect(self.on_metadata_progress)
         self.metadata_worker.finished_batch.connect(self.on_metadata_finished)
@@ -202,18 +204,22 @@ class LibraryView(QWidget):
         if hasattr(main_win, "track_worker"):
             main_win.track_worker(self.metadata_worker, "Bulk re-matching metadata…")
 
-    # ── Slots ──────────────────────────────────────────────────
+    # ── Slots ────────────────────────────────────────────────
 
     def on_metadata_progress(self, current: int, total: int, label: str) -> None:
-        percent = int((current / total) * 100) if total else 0
         self.progress.setRange(0, max(total, 1))
         self.progress.setValue(current)
         self.status_label.setText(f"Metadata {current}/{total}: {label}")
 
     def on_probe_progress(self, current: int, total: int, label: str) -> None:
-        percent = int((current / total) * 100) if total else 0
-        self.progress.setValue(percent)
+        self.progress.setRange(0, max(total, 1))
+        self.progress.setValue(current)
         self.status_label.setText(f"ffprobe {current}/{total}: {label}")
+
+    def on_probe_file_error(self, file_path: str, error_msg: str) -> None:
+        """Called from the worker thread for each file that ffprobe can't process."""
+        # Collect silently during the run; show a summary at the end
+        self._probe_errors.append((file_path, error_msg))
 
     def on_metadata_finished(self) -> None:
         self.progress.hide()
@@ -223,7 +229,28 @@ class LibraryView(QWidget):
 
     def on_probe_finished(self) -> None:
         self.progress.hide()
-        self.status_label.setText("ffprobe enrich complete.")
+        error_count = len(self._probe_errors)
+        if error_count == 0:
+            self.status_label.setText("ffprobe enrich complete — all files processed successfully.")
+        else:
+            self.status_label.setText(
+                f"ffprobe enrich complete — {error_count} file(s) could not be probed (marked as error)."
+            )
+            # Build a readable summary (cap at 10 lines to avoid giant dialogs)
+            lines = []
+            for path, reason in self._probe_errors[:10]:
+                short = path.split("\\")[-1] if "\\" in path else path.split("/")[-1]
+                lines.append(f"• {short}\n  {reason}")
+            if error_count > 10:
+                lines.append(f"\u2026 and {error_count - 10} more (see log for full list).")
+            QMessageBox.warning(
+                self,
+                f"{error_count} file(s) skipped during ffprobe",
+                "The following files could not be probed and were marked as errors.\n"
+                "They will be skipped on future runs.\n\n"
+                + "\n\n".join(lines),
+            )
+        self._probe_errors = []
         self.load_rows()
 
     def on_health_finished(self, counts: dict) -> None:
