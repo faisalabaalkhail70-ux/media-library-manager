@@ -1,13 +1,15 @@
 import json
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
-    QTableView, QLineEdit, QAbstractItemView
+    QTableView, QLineEdit, QAbstractItemView, QStackedWidget
 )
 from PySide6.QtCore import Qt, QSortFilterProxyModel
 from mlm.db.connection import get_connection
 from mlm.ui.models.shows_model import ShowsTableModel
 from mlm.ui.column_visibility import ColumnVisibilityDialog, apply_saved_visibility
 from mlm.ui.filter_panel import FilterPanel
+from mlm.ui.grid_view import PosterGridWidget
+from mlm.ui.views.entity_detail_panel import EntityDetailPanel
 from mlm.workers.episode_worker import EpisodeWorker
 
 
@@ -20,6 +22,7 @@ class ShowsView(QWidget):
         self._proxy.setSourceModel(self._source_model)
         self._proxy.setSortCaseSensitivity(Qt.CaseInsensitive)
         self._detail_view = None
+        self._entity_detail: EntityDetailPanel | None = None
         self._worker = None
 
         layout = QVBoxLayout(self)
@@ -30,7 +33,7 @@ class ShowsView(QWidget):
         title_lbl.setObjectName("h1")
         layout.addWidget(title_lbl)
 
-        # ── Toolbar ───────────────────────────────────────────────────
+        # ── Toolbar ─────────────────────────────────────────────────
         toolbar = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search by title...")
@@ -50,6 +53,11 @@ class ShowsView(QWidget):
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.load_rows)
 
+        # View toggle
+        self._view_toggle = QPushButton("\u22f9 Grid View")
+        self._view_toggle.setCheckable(True)
+        self._view_toggle.clicked.connect(self._toggle_view)
+
         self.status_label = QLabel("")
         self.status_label.setObjectName("muted")
 
@@ -57,6 +65,7 @@ class ShowsView(QWidget):
         toolbar.addWidget(self.clear_search_btn)
         toolbar.addStretch()
         toolbar.addWidget(self.status_label)
+        toolbar.addWidget(self._view_toggle)
         toolbar.addWidget(self.check_btn)
         toolbar.addWidget(col_btn)
         toolbar.addWidget(self.refresh_btn)
@@ -67,7 +76,10 @@ class ShowsView(QWidget):
         self._filters.changed.connect(self._apply_all)
         layout.addWidget(self._filters)
 
-        # ── Table ────────────────────────────────────────────────────
+        # ── Stacked: table | grid ─────────────────────────────────────
+        self._stack = QStackedWidget()
+
+        # Table page (index 0)
         self.table = QTableView()
         self.table.setModel(self._proxy)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -77,10 +89,17 @@ class ShowsView(QWidget):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setSortIndicatorShown(True)
-        self.table.doubleClicked.connect(self._open_detail)
-        layout.addWidget(self.table)
+        self.table.doubleClicked.connect(self._open_episode_detail)
+        self._stack.addWidget(self.table)   # index 0
 
-        hint = QLabel("Double-click a show to view episode details.")
+        # Grid page (index 1)
+        self._grid = PosterGridWidget()
+        self._grid.card_clicked.connect(self._open_entity_detail)
+        self._stack.addWidget(self._grid)   # index 1
+
+        layout.addWidget(self._stack)
+
+        hint = QLabel("Double-click a show (list) or click a card (grid) to view details.")
         hint.setObjectName("muted")
         layout.addWidget(hint)
 
@@ -93,10 +112,7 @@ class ShowsView(QWidget):
                 """
                 SELECT
                     me.id AS entity_id,
-                    me.title,
-                    me.release_year,
-                    me.rating,
-                    me.genres_json,
+                    me.title, me.release_year, me.rating, me.genres_json, me.poster_path,
                     COUNT(DISTINCT CASE WHEN ep.is_missing = 0
                           THEN ep.season_number END)                            AS seasons_have,
                     COUNT(DISTINCT CASE
@@ -137,7 +153,17 @@ class ShowsView(QWidget):
             rows = [r for r in rows if q in r.get("title", "").lower()]
         rows = self._filters.apply(rows)
         self._source_model.set_rows(rows)
+        self._grid.set_rows(rows)
         self.status_label.setText(f"{len(rows)} of {len(self._all_rows)} shows")
+
+    def _toggle_view(self) -> None:
+        is_grid = self._view_toggle.isChecked()
+        self._stack.setCurrentIndex(1 if is_grid else 0)
+        self._view_toggle.setText("\u2630 List View" if is_grid else "\u22f9 Grid View")
+
+    def _open_entity_detail(self, entity_id: int) -> None:
+        self._entity_detail = EntityDetailPanel(entity_id, parent=self)
+        self._entity_detail.show()
 
     def _check_missing(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -156,7 +182,7 @@ class ShowsView(QWidget):
         self.check_btn.setEnabled(True)
         total_missing = sum(r.get("missing_count", 0) for r in results)
         self.status_label.setText(
-            f"Check complete — {total_missing} missing episode(s) found across {len(results)} show(s)"
+            f"Check complete — {total_missing} missing episode(s) across {len(results)} show(s)"
         )
         self.load_rows()
 
@@ -168,10 +194,10 @@ class ShowsView(QWidget):
         dlg = ColumnVisibilityDialog(self.table, "shows", parent=self)
         dlg.exec()
 
-    def _open_detail(self, index) -> None:
+    def _open_episode_detail(self, index) -> None:
         source_index = self._proxy.mapToSource(index)
         row = self._source_model.get_row(source_index.row())
-        entity_id = row.get("entity_id")
+        entity_id  = row.get("entity_id")
         show_title = row.get("title", "Show")
         if not entity_id:
             return
