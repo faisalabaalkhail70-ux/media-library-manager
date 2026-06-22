@@ -1,12 +1,16 @@
 """Detect exact and quality-variant media files.
 
-Three group types:
-  exact   — same bytes (size + partial hash + full hash match)
-  quality — same TMDB entity + same episode, different resolution/file
-  possible— fuzzy name/duration/size similarity, catch-all for the rest
+Three group types
+  exact    — identical bytes (size + partial_hash + full_hash)
+  quality  — same TMDB entity + different file path / resolution
+  possible — fuzzy name/duration/size similarity
 
-'possible' rows that share a TMDB entity are now reclassified as
-'quality' automatically, so the user sees a meaningful label.
+Key guards against false positives
+  1. Episode-code guard  : never group S01E01 with S01E04
+  2. Same-folder guard   : files in the same folder are almost certainly
+                           different episodes, skip them
+  3. Normalised scoring  : strip codec/quality tags before name comparison
+  4. Graduated duration  : 60-second tolerance with linear decay
 """
 import logging
 from collections import defaultdict
@@ -15,13 +19,15 @@ from mlm.db.connection import get_connection
 from mlm.db.repositories.duplicates_repo import DuplicatesRepository
 from mlm.db.repositories.files_repo import FilesRepository
 from mlm.utils.hashing import partial_md5, full_md5
-from mlm.utils.similarity import text_similarity, duration_similarity, size_similarity
+from mlm.utils.similarity import (
+    text_similarity, duration_similarity, size_similarity, same_episode
+)
 
 log = logging.getLogger(__name__)
 
-_MAX_SIZE_DIFF_BYTES      = 200 * 1024 * 1024   # 200 MB
-_MAX_DURATION_DIFF_SECONDS = 120
-_MIN_SCORE                = 0.85
+_MAX_SIZE_DIFF_BYTES       = 200 * 1024 * 1024   # 200 MB
+_MAX_DURATION_DIFF_SECONDS = 120                 # hard outer limit
+_MIN_SCORE                 = 0.80                # lowered slightly; episode guard does the heavy lifting
 
 
 class DuplicateService:
@@ -30,7 +36,7 @@ class DuplicateService:
         repo: DuplicatesRepository | None = None,
         files_repo: FilesRepository | None = None,
     ) -> None:
-        self.repo = repo or DuplicatesRepository()
+        self.repo       = repo or DuplicatesRepository()
         self.files_repo = files_repo or FilesRepository()
 
     def _list_candidate_files(self) -> list[dict]:
@@ -39,7 +45,7 @@ class DuplicateService:
                 """
                 SELECT id, entity_id, file_name, file_path, file_size_bytes,
                        duration_seconds, partial_hash, full_hash,
-                       resolution, video_codec
+                       resolution, video_codec, parent_folder
                 FROM media_files
                 WHERE removed_at IS NULL
                 ORDER BY file_size_bytes DESC
@@ -49,14 +55,13 @@ class DuplicateService:
 
     def build_duplicate_groups(self) -> dict:
         files = self._list_candidate_files()
-        self.repo.clear_groups()
+        self.repo.clear_non_ignored_groups()   # preserve "ignored" groups
         log.info("Building duplicate groups from %d candidate files", len(files))
 
         exact_groups   = self._build_exact_duplicates(files)
         quality_groups = self._build_quality_variants(files)
-        # Exclude files already in an exact or quality group from fuzzy scan
-        used_ids: set[int] = self._ids_in_groups()
-        remaining = [f for f in files if f["id"] not in used_ids]
+        used_ids       = self._ids_in_groups()
+        remaining      = [f for f in files if f["id"] not in used_ids]
         possible_groups = self._build_possible_duplicates(remaining)
 
         log.info(
@@ -64,8 +69,8 @@ class DuplicateService:
             exact_groups, quality_groups, possible_groups,
         )
         return {
-            "exact_groups":   exact_groups,
-            "quality_groups": quality_groups,
+            "exact_groups":    exact_groups,
+            "quality_groups":  quality_groups,
             "possible_groups": possible_groups,
         }
 
@@ -114,25 +119,16 @@ class DuplicateService:
 
         return group_count
 
-    # ── Quality variants (same entity, different resolution) ────────────────
+    # ── Quality variants ─────────────────────────────────────────────────
 
     def _build_quality_variants(self, files: list[dict]) -> int:
-        """Group files that share the same media_entity_id (and thus represent
-        the same movie or episode) but differ in file path / resolution.
-
-        These are intentional quality upgrades/downgrades, not accidental
-        copies — surfaced separately so the user can choose which to keep.
-        """
-        # Bucket by entity_id; also look at episodes rows for TV
         entity_buckets: dict[int, list[dict]] = defaultdict(list)
         for f in files:
             if f["entity_id"] is not None:
                 entity_buckets[f["entity_id"]].append(f)
 
-        # For TV shows, further split by (season, episode)
-        # Pull episode rows for the files we care about
         file_ids = [f["id"] for f in files if f["entity_id"] is not None]
-        ep_map: dict[int, tuple[int, int]] = {}   # file_id → (season, episode)
+        ep_map: dict[int, tuple[int, int]] = {}
         if file_ids:
             placeholders = ",".join("?" * len(file_ids))
             with get_connection() as conn:
@@ -152,22 +148,19 @@ class DuplicateService:
             if len(members) < 2:
                 continue
 
-            # Sub-bucket: for TV by episode key, for movies treat all as one bucket
             sub_buckets: dict[tuple, list[dict]] = defaultdict(list)
             for f in members:
-                key = ep_map.get(f["id"], (0, 0))   # (0,0) = movie / unlinked
+                key = ep_map.get(f["id"], (0, 0))
                 sub_buckets[key].append(f)
 
             for sub_members in sub_buckets.values():
                 if len(sub_members) < 2:
                     continue
-                # Skip if all files are identical in path (shouldn’t happen)
                 if len({f["file_path"] for f in sub_members}) < 2:
                     continue
-                score = 1.0  # definite — same TMDB entity
-                gid = self.repo.create_group("quality", score)
+                gid = self.repo.create_group("quality", 1.0)
                 for item in sub_members:
-                    self.repo.add_item(gid, item["id"], score, {
+                    self.repo.add_item(gid, item["id"], 1.0, {
                         "reason": "same_entity_diff_file",
                         "resolution": item.get("resolution"),
                     })
@@ -178,11 +171,16 @@ class DuplicateService:
     # ── Possible duplicates (fuzzy) ─────────────────────────────────────
 
     def _build_possible_duplicates(self, files: list[dict]) -> int:
-        group_count  = 0
-        used_pairs:  set[tuple[int, int]] = set()
+        group_count = 0
+        used_pairs: set[tuple[int, int]] = set()
+
+        # Build ignored group IDs so we skip them
+        ignored_ids = self._ignored_file_ids()
 
         size_buckets: dict[int, list[dict]] = defaultdict(list)
         for f in files:
+            if f["id"] in ignored_ids:
+                continue
             bucket = f["file_size_bytes"] // (_MAX_SIZE_DIFF_BYTES // 2)
             size_buckets[bucket].append(f)
             size_buckets[bucket + 1].append(f)
@@ -192,12 +190,25 @@ class DuplicateService:
             for i, a in enumerate(bucket_files):
                 for b in bucket_files[i + 1:]:
                     pair_key = (min(a["id"], b["id"]), max(a["id"], b["id"]))
-                    if pair_key in seen_in_bucket:
+                    if pair_key in seen_in_bucket or pair_key in used_pairs:
                         continue
                     seen_in_bucket.add(pair_key)
 
+                    # ── Guard 1: different episode codes → never duplicates
+                    ep_check = same_episode(a["file_name"], b["file_name"])
+                    if ep_check is False:   # both have codes and they differ
+                        continue
+
+                    # ── Guard 2: same parent folder → almost certainly different episodes
+                    if (a.get("parent_folder") and b.get("parent_folder") and
+                            a["parent_folder"] == b["parent_folder"]):
+                        continue
+
+                    # ── Guard 3: size too different
                     if abs(a["file_size_bytes"] - b["file_size_bytes"]) > _MAX_SIZE_DIFF_BYTES:
                         continue
+
+                    # ── Guard 4: duration too different
                     if (a["duration_seconds"] and b["duration_seconds"] and
                             abs(a["duration_seconds"] - b["duration_seconds"]) > _MAX_DURATION_DIFF_SECONDS):
                         continue
@@ -207,22 +218,35 @@ class DuplicateService:
                     sz_score   = size_similarity(a["file_size_bytes"], b["file_size_bytes"])
                     score = round((name_score * 0.5) + (dur_score * 0.3) + (sz_score * 0.2), 3)
 
-                    if score < _MIN_SCORE or pair_key in used_pairs:
+                    if score < _MIN_SCORE:
                         continue
-                    used_pairs.add(pair_key)
 
+                    used_pairs.add(pair_key)
                     gid = self.repo.create_group("possible", score)
                     for item in (a, b):
                         self.repo.add_item(gid, item["id"], score, {
-                            "name_score": name_score,
+                            "name_score":     name_score,
                             "duration_score": dur_score,
-                            "size_score": sz_score,
+                            "size_score":     sz_score,
                         })
                     group_count += 1
 
         return group_count
 
-    # ── Hash helpers ─────────────────────────────────────────────────
+    def _ignored_file_ids(self) -> set[int]:
+        """Return file IDs that belong to a group marked review_status='ignored'."""
+        with get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT di.media_file_id
+                FROM duplicate_items di
+                JOIN duplicate_groups dg ON dg.id = di.group_id
+                WHERE dg.review_status = 'ignored'
+                """
+            ).fetchall()
+        return {r[0] for r in rows}
+
+    # ── Hash helpers ─────────────────────────────────────────────────────
 
     def _compute_partial(self, item: dict) -> str:
         if item["partial_hash"]:
