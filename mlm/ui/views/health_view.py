@@ -58,9 +58,9 @@ class HealthView(QWidget):
         summary_row = QHBoxLayout()
         summary_row.setSpacing(12)
 
-        self.ok_card      = self._summary_card("OK",      "0", "#81c784")
-        self.warn_card    = self._summary_card("Warnings","0", "#fff176")
-        self.error_card   = self._summary_card("Errors",  "0", "#ef5350")
+        self.ok_card    = self._summary_card("OK",       "0", "#81c784")
+        self.warn_card  = self._summary_card("Warnings", "0", "#fff176")
+        self.error_card = self._summary_card("Errors",   "0", "#ef5350")
 
         summary_row.addWidget(self.ok_card[0])
         summary_row.addWidget(self.warn_card[0])
@@ -84,9 +84,7 @@ class HealthView(QWidget):
 
     # ── Helpers ───────────────────────────────────────────────────
 
-    def _summary_card(
-        self, label: str, value: str, color: str
-    ) -> tuple:
+    def _summary_card(self, label: str, value: str, color: str) -> tuple:
         from PySide6.QtWidgets import QFrame
         card = QFrame()
         card.setObjectName("stat_card")
@@ -147,7 +145,7 @@ class HealthView(QWidget):
             cells = [
                 status.upper(),
                 row.get("file_name", ""),
-                row.get("health_notes", "") or "—",
+                row.get("health_notes", "") or "\u2014",
                 row.get("file_path", ""),
             ]
             for col, text in enumerate(cells):
@@ -160,12 +158,11 @@ class HealthView(QWidget):
         self._update_summary(counts)
 
         total = len(rows)
-        issues = counts.get("warning", 0) + counts.get("error", 0)
         if total == 0:
-            self.status_label.setText("No health data — run a scan first.")
+            self.status_label.setText("No health data \u2014 run a scan first.")
         else:
             self.status_label.setText(
-                f"{total} files checked — {counts['ok']} OK, "
+                f"{total} files checked \u2014 {counts['ok']} OK, "
                 f"{counts['warning']} warnings, {counts['error']} errors"
             )
 

@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (
 )
 
 from mlm.db.repositories.files_repo import FilesRepository
-from mlm.services.health_service import HealthService
 from mlm.ui.models.media_files_model import MediaFilesTableModel
+from mlm.workers.health_worker import HealthWorker
 from mlm.workers.metadata_worker import MetadataWorker
 from mlm.workers.probe_worker import ProbeWorker
 
@@ -21,10 +21,10 @@ class LibraryView(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.repo = FilesRepository()
-        self.health_service = HealthService()
         self.model = MediaFilesTableModel([])
         self.metadata_worker = None
         self.probe_worker = None
+        self.health_worker = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -129,10 +129,14 @@ class LibraryView(QWidget):
 
         self.load_rows()
 
+    # ── Data ──────────────────────────────────────────────────────
+
     def load_rows(self) -> None:
         rows = self.repo.fetch_library_rows()
         self.model.set_rows(rows)
         self.count_label.setText(f"{len(rows)} rows loaded")
+
+    # ── Actions ───────────────────────────────────────────────────
 
     def run_metadata_match(self) -> None:
         if self.metadata_worker and self.metadata_worker.isRunning():
@@ -167,19 +171,24 @@ class LibraryView(QWidget):
         self.probe_worker.start()
 
     def run_health_scan(self) -> None:
-        try:
-            result = self.health_service.run_health_scan()
-            self.status_label.setText(
-                f'Health scan complete. OK: {result["ok"]}, Warning: {result["warning"]}, Error: {result["error"]}'
-            )
-            QMessageBox.information(
-                self,
-                "Health Scan Complete",
-                f'OK: {result["ok"]}\nWarning: {result["warning"]}\nError: {result["error"]}'
-            )
-            self.load_rows()
-        except Exception as exc:
-            self.on_worker_failed(str(exc))
+        """Launch health scan on a background thread — never blocks the UI."""
+        if self.health_worker and self.health_worker.isRunning():
+            self.health_worker.stop()
+            self.status_label.setText("Stopping health scan...")
+            self.health_btn.setText("Run Health Scan")
+            return
+
+        self.health_worker = HealthWorker()
+        self.health_worker.finished_scan.connect(self.on_health_finished)
+        self.health_worker.failed.connect(self.on_worker_failed)
+
+        self.progress.show()
+        self.progress.setRange(0, 0)   # indeterminate
+        self.health_btn.setText("Stop Health Scan")
+        self.status_label.setText("Running health scan...")
+        self.health_worker.start()
+
+    # ── Slots ─────────────────────────────────────────────────────
 
     def on_metadata_progress(self, current: int, total: int, label: str) -> None:
         percent = int((current / total) * 100) if total else 0
@@ -201,7 +210,21 @@ class LibraryView(QWidget):
         self.status_label.setText("ffprobe enrich complete.")
         self.load_rows()
 
+    def on_health_finished(self, counts: dict) -> None:
+        self.progress.hide()
+        self.progress.setRange(0, 100)
+        self.health_btn.setText("Run Health Scan")
+        ok   = counts.get("ok", 0)
+        warn = counts.get("warning", 0)
+        err  = counts.get("error", 0)
+        self.status_label.setText(
+            f"Health scan complete — OK: {ok}, Warnings: {warn}, Errors: {err}"
+        )
+        self.load_rows()
+
     def on_worker_failed(self, message: str) -> None:
         self.progress.hide()
+        self.progress.setRange(0, 100)
+        self.health_btn.setText("Run Health Scan")
         self.status_label.setText("Operation failed.")
         QMessageBox.critical(self, "Operation failed", message)

@@ -17,16 +17,16 @@ from mlm.ui.views.settings_view    import SettingsView
 
 
 NAV_ITEMS = [
-    ("🏠  Dashboard",   DashboardView),
-    ("📂  Scanner",     ScannerView),
-    ("📚  Library",     LibraryView),
-    ("🎬  Movies",      MoviesView),
-    ("📺  TV Shows",    ShowsView),
-    ("🔍  Duplicates",  DuplicatesView),
-    ("✏️  Rename",      RenameView),
-    ("🩺  Health",      HealthView),
-    ("📊  Reports",     ReportsView),
-    ("⚙️  Settings",    SettingsView),
+    ("\U0001f3e0  Dashboard",   DashboardView),
+    ("\U0001f4c2  Scanner",     ScannerView),
+    ("\U0001f4da  Library",     LibraryView),
+    ("\U0001f3ac  Movies",      MoviesView),
+    ("\U0001f4fa  TV Shows",    ShowsView),
+    ("\U0001f50d  Duplicates",  DuplicatesView),
+    ("\u270f\ufe0f  Rename",      RenameView),
+    ("\U0001fa7a  Health",      HealthView),
+    ("\U0001f4ca  Reports",     ReportsView),
+    ("\u2699\ufe0f  Settings",    SettingsView),
 ]
 
 
@@ -34,7 +34,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Media Library Manager")
-        self.resize(1400, 860)
+        # NOTE: window size is set by bootstrap.py via cfg.window_width/height
 
         central = QWidget()
         self.setCentralWidget(central)
