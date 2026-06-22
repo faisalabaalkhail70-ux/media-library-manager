@@ -115,6 +115,14 @@ class _UpdateDialog(QDialog):
         btn_row.addStretch()
         lay.addLayout(btn_row)
 
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        """Ensure download thread is stopped if dialog is closed mid-download."""
+        if self._worker and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(3000)
+        super().closeEvent(event)
+
     def _start_download(self) -> None:
         self._install_btn.setEnabled(False)
         self._progress.setVisible(True)
@@ -302,6 +310,14 @@ class SettingsView(QWidget):
 
         density = self.settings.get("ui_row_density", "comfortable")
         self.density_combo.setCurrentIndex(0 if density == "comfortable" else 1)
+
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        """Stop any running workers before the widget is destroyed."""
+        if self._check_worker and self._check_worker.isRunning():
+            self._check_worker.quit()
+            self._check_worker.wait(2000)
+        super().closeEvent(event)
 
     def save_settings(self) -> None:
         self.settings.set("tmdb_api_key",    self.tmdb_key.text().strip())
