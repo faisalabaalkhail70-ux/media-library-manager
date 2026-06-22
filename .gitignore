@@ -1,13 +1,35 @@
+# Python
 __pycache__/
 *.pyc
-*.zip
-*.db
-data/
-.env
-.venv/
-venv/
-.idea/
-.vscode/
+*.pyo
+*.pyd
+*.egg-info/
 dist/
 build/
-*.egg-info/
+
+# Archives
+*.zip
+*.tar.gz
+
+# App runtime data (NEVER commit — contains your personal DB, API keys, logs)
+data/
+!data/.gitkeep
+
+# Environment / secrets
+.env
+.env.*
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
