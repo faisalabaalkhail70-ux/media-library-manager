@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QTableView, QLineEdit, QAbstractItemView, QStackedWidget,
     QMessageBox, QFrame
 )
-from PySide6.QtCore import Qt, QSortFilterProxyModel
+from PySide6.QtCore import Qt, QSortFilterProxyModel, QTimer
 
 from mlm.db.connection import get_connection
 from mlm.ui.models.movies_model import MoviesTableModel
@@ -29,27 +29,45 @@ from mlm.ui.views.entity_detail_panel import EntityDetailPanel
 
 
 def _open_path(path: str) -> None:
-    """Open a file or folder in the OS file explorer / default player."""
+    """Open a file with its default application.
+
+    Shows a friendly QMessageBox with the path if the helper tool
+    (xdg-open / open) is not found instead of crashing.
+    """
     if not path or not os.path.exists(path):
         return
-    if sys.platform == "win32":
-        os.startfile(path)          # type: ignore[attr-defined]
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", path])
-    else:
-        subprocess.Popen(["xdg-open", path])
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)          # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path], stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["xdg-open", path], stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(None, "Open File", f"Could not open automatically:\n{path}")
 
 
 def _open_folder(path: str) -> None:
-    """Select the file inside Explorer / Finder."""
+    """Reveal the file in the OS file manager.
+
+    On Linux, xdg-open only supports opening a folder (no file highlight),
+    so we open the parent folder as a best-effort.  Falls back to showing
+    the path in a dialog if the helper is not found.
+    """
     if not path or not os.path.exists(path):
         return
-    if sys.platform == "win32":
-        subprocess.Popen(["explorer", "/select,", path])
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", "-R", path])
-    else:
-        subprocess.Popen(["xdg-open", os.path.dirname(path)])
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", path], stderr=subprocess.DEVNULL)
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path], stderr=subprocess.DEVNULL)
+        else:
+            # xdg-open cannot highlight a file; open its folder instead
+            subprocess.Popen(["xdg-open", os.path.dirname(path)], stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(None, "Open Folder", f"File is located at:\n{path}")
 
 
 class MoviesView(QWidget):
@@ -61,6 +79,10 @@ class MoviesView(QWidget):
         self._proxy.setSourceModel(self._source_model)
         self._proxy.setSortCaseSensitivity(Qt.CaseInsensitive)
         self._detail: EntityDetailPanel | None = None
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(self._apply_all_now)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -105,7 +127,7 @@ class MoviesView(QWidget):
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search by title...")
         self.search_input.setFixedWidth(280)
-        self.search_input.textChanged.connect(self._apply_all)
+        self.search_input.textChanged.connect(self._search_timer.start)
 
         clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(self.search_input.clear)
@@ -201,17 +223,8 @@ class MoviesView(QWidget):
             if self._res_width(r.get("resolution")) >= 1920
         )
 
-        # Total runtime via separate query (not in cached rows)
-        with get_connection() as conn:
-            res = conn.execute(
-                """
-                SELECT SUM(mf.duration_seconds)
-                FROM media_files mf
-                JOIN media_entities me ON me.id = mf.entity_id
-                WHERE me.media_type = 'movie' AND mf.removed_at IS NULL
-                """
-            ).fetchone()
-        total_secs = res[0] or 0
+        # Total runtime from the currently visible (filtered) rows
+        total_secs = sum(r.get("duration_seconds") or 0 for r in rows)
         h = total_secs // 3600
         m = (total_secs % 3600) // 60
 
@@ -248,7 +261,7 @@ class MoviesView(QWidget):
                 SELECT me.id AS entity_id, me.title, me.release_year,
                        me.rating, me.genres_json, me.poster_path,
                        mf.resolution, mf.file_size_bytes, mf.file_name,
-                       mf.file_path
+                       mf.file_path, mf.duration_seconds
                 FROM media_entities me
                 LEFT JOIN media_files mf ON mf.entity_id = me.id AND mf.removed_at IS NULL
                 WHERE me.media_type = 'movie'
@@ -271,6 +284,10 @@ class MoviesView(QWidget):
         self._apply_all()
 
     def _apply_all(self) -> None:
+        """Called by filter panel signal (immediate) or programmatically."""
+        self._apply_all_now()
+
+    def _apply_all_now(self) -> None:
         q = self.search_input.text().strip().lower()
         rows = self._all_rows
         if q:
@@ -338,19 +355,23 @@ class MoviesView(QWidget):
         title     = row.get("title", "?")
         reply = QMessageBox.question(
             self, "Refresh Metadata",
-            f'Re-fetch TMDB metadata for “{title}”?',
+            f'Re-fetch TMDB metadata for "{title}"?',
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
         try:
-            from mlm.services.tmdb_service import TmdbService
-            svc = TmdbService()
+            from mlm.services.metadata_service import MetadataService
+            svc = MetadataService()
             svc.refresh_entity(entity_id)
             self.load_rows()
-            QMessageBox.information(self, "Done", f'“{title}” metadata refreshed.')
+            QMessageBox.information(self, "Done", f'"{title}" metadata refreshed.')
+        except ValueError as exc:
+            # Entity has no TMDB id — tell user they need to match first
+            QMessageBox.warning(self, "Cannot Refresh", str(exc))
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Refresh failed:\n{exc}")
+
 
     def _export_csv(self) -> None:
         rows = self._source_model._rows
