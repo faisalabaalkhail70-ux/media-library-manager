@@ -6,8 +6,7 @@ cached it returns immediately (no network call).
 
 TMDB image base URL: https://image.tmdb.org/t/p/w185<poster_path>
 """
-from pathlib import Path
-from PySide6.QtCore import QThread, Signal, QObject
+from PySide6.QtCore import QThread, Signal, QObject, Qt
 from PySide6.QtGui import QPixmap
 from mlm.app.paths import POSTER_DIR
 
@@ -20,7 +19,6 @@ def placeholder_pixmap(w: int = 120, h: int = 178) -> QPixmap:
     global _PLACEHOLDER
     if _PLACEHOLDER is None or _PLACEHOLDER.width() != w:
         from PySide6.QtGui import QPainter, QColor, QFont
-        from PySide6.QtCore import Qt
         px = QPixmap(w, h)
         px.fill(QColor("#2a2a3e"))
         p = QPainter(px)
@@ -40,7 +38,7 @@ class PosterLoader(QThread):
 
     def __init__(self, entity_id: int, poster_path: str, parent: QObject | None = None):
         super().__init__(parent)
-        self._entity_id  = entity_id
+        self._entity_id   = entity_id
         self._poster_path = poster_path
 
     def run(self) -> None:
@@ -72,8 +70,5 @@ class PosterCache:
         if local.exists():
             px = QPixmap(str(local))
             if not px.isNull():
-                return px.scaled(w, h, aspectMode=__import__(
-                    'PySide6.QtCore', fromlist=['Qt']).Qt.KeepAspectRatio,
-                    transformMode=__import__(
-                    'PySide6.QtCore', fromlist=['Qt']).Qt.SmoothTransformation)
+                return px.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         return None
