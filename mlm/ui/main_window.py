@@ -1,26 +1,29 @@
-"""Main application window — redesigned 2026 UI.
+"""Main application window — 2026 cinematic redesign.
 
 Layout
 ──────
   ┌─────────────────────────────────────────────────────┐
-  │  Custom title bar  (drag, min/max/close)            │
-  ├──────────┬──────────────────────────────────────────┤
-  │          │  Top bar: search + activity              │
-  │  Icon    ├──────────────────────────────────────────┤
-  │  sidebar │  Page content (QStackedWidget)           │
-  │  (60px)  │                                          │
-  │          │                                          │
-  ├──────────┴──────────────────────────────────────────┤
-  │  Status bar                                         │
+  │  Custom title bar  (drag / min / max / close)       │
+  ├─────────────┬────────────────────────────────────┤
+  │            │  Top bar: breadcrumb + search + status   │
+  │  Hero       ├──────────────────────────────────────────────┤
+  │  sidebar   │  Page content (QStackedWidget)           │
+  │  icon+label │                                          │
+  │  (180 px)  │                                          │
+  ├─────────────┴────────────────────────────────────┤
+  │  Status bar                                           │
   └─────────────────────────────────────────────────────┘
 
-Sidebar uses Unicode symbol icons + tooltip labels.
-No native window chrome — fully custom frame.
+Sidebar: painted hero gradient with icon + label nav items.
+Each nav item is a 180px-wide button showing icon + section name.
 """
 import logging
 
-from PySide6.QtCore import Qt, QPoint, QThread, QSize
-from PySide6.QtGui import QFont, QColor, QPainter, QLinearGradient, QBrush, QPen
+from PySide6.QtCore import Qt, QPoint, QThread, QRect, QRectF, QSize
+from PySide6.QtGui import (
+    QColor, QPainter, QLinearGradient, QRadialGradient,
+    QBrush, QPen, QPainterPath, QFont, QFontMetrics
+)
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QMainWindow,
     QProgressBar, QPushButton,
@@ -46,62 +49,214 @@ from mlm.ui.views.settings_view     import SettingsView
 
 log = logging.getLogger(__name__)
 
-# (icon_glyph, tooltip_label, ViewClass)
+# (icon_glyph, label, ViewClass)
 NAV_ITEMS = [
-    ("⌂",  "Dashboard",   DashboardView),
-    ("⊕",  "Scanner",     ScannerView),
-    ("▤",  "Library",     LibraryView),
-    ("▶",  "Movies",      MoviesView),
-    ("⊞",  "TV Shows",    ShowsView),
-    ("◫",  "Collections", CollectionsView),
-    ("♥",  "Watchlist",   WatchlistView),
-    ("⊜",  "Duplicates",  DuplicatesView),
-    ("✎",  "Rename",      RenameView),
-    ("✦",  "Health",      HealthView),
-    ("◈",  "Reports",     ReportsView),
-    ("⚙",  "Settings",    SettingsView),
+    ("⌂",  "Dashboard",    DashboardView),
+    ("⊕",  "Scanner",      ScannerView),
+    ("▤",  "Library",      LibraryView),
+    ("▶",  "Movies",       MoviesView),
+    ("⊞",  "TV Shows",     ShowsView),
+    ("◫",  "Collections",  CollectionsView),
+    ("♥",  "Watchlist",    WatchlistView),
+    ("⊜",  "Duplicates",   DuplicatesView),
+    ("✎",  "Rename",       RenameView),
+    ("✦",  "Health",       HealthView),
+    ("◈",  "Reports",      ReportsView),
+    ("⚙",  "Settings",     SettingsView),
 ]
 
+_ACCENT      = QColor(124, 111, 255)
+_SIDEBAR_BG1 = QColor(8,   6,  22)     # top of sidebar gradient
+_SIDEBAR_BG2 = QColor(12, 10, 28)     # bottom
+_ITEM_H      = 42
 
-class _TitleBar(QWidget):
-    """Draggable custom title bar with min / max / close."""
 
-    def __init__(self, parent: QMainWindow) -> None:
+# ──────────────────────────────────────────────────────────────────────
+class _HeroSidebar(QWidget):
+    """
+    Fully custom-painted sidebar.
+    Draws its own gradient background, logo mark, divider,
+    and all nav items — no stylesheet needed.
+    """
+    _nav_clicked = None   # injected by MainWindow
+
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._win = parent
+        self.setFixedWidth(180)
+        self._active = 0
+        self._hovered = -1
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
+        # reserve top for logo + divider
+        self._nav_top = 90
+        self._item_rects: list[QRect] = []
+
+    def set_active(self, index: int) -> None:
+        self._active = index
+        self.update()
+
+    def _item_rect(self, i: int) -> QRect:
+        y = self._nav_top + i * (_ITEM_H + 2)
+        return QRect(10, y, self.width() - 20, _ITEM_H)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.TextAntialiasing)
+        w, h = self.width(), self.height()
+
+        # ─ Background gradient
+        bg = QLinearGradient(0, 0, 0, h)
+        bg.setColorAt(0, _SIDEBAR_BG1)
+        bg.setColorAt(1, _SIDEBAR_BG2)
+        p.fillRect(0, 0, w, h, bg)
+
+        # ─ Right border
+        p.setPen(QPen(QColor(255, 255, 255, 12), 1))
+        p.drawLine(w - 1, 0, w - 1, h)
+
+        # ─ Logo area: large glowing diamond
+        lf = QFont("Segoe UI Symbol", 24)
+        p.setFont(lf)
+        logo_grad = QLinearGradient(0, 18, w, 50)
+        logo_grad.setColorAt(0, QColor(200, 195, 255))
+        logo_grad.setColorAt(1, _ACCENT)
+        pen = QPen()
+        pen.setBrush(QBrush(logo_grad))
+        p.setPen(pen)
+        p.drawText(QRect(0, 14, w, 42), Qt.AlignCenter, "◈")
+
+        # App name
+        af = QFont("Segoe UI", 8, QFont.Bold)
+        p.setFont(af)
+        p.setPen(QColor(80, 75, 120))
+        p.drawText(QRect(0, 52, w, 16), Qt.AlignCenter, "MEDIA LIBRARY")
+
+        # Divider
+        p.setPen(QPen(QColor(255, 255, 255, 10), 1))
+        p.drawLine(20, 76, w - 20, 76)
+
+        # ─ Nav items
+        icon_font  = QFont("Segoe UI Symbol", 14)
+        label_font = QFont("Segoe UI", 9)
+        label_font.setWeight(QFont.Medium)
+
+        n = len(NAV_ITEMS)
+        for i, (icon, label, _) in enumerate(NAV_ITEMS):
+            rect = self._item_rect(i)
+            is_active  = (i == self._active)
+            is_hovered = (i == self._hovered)
+            is_settings = (i == n - 1)
+
+            # Push Settings to near-bottom
+            if is_settings:
+                rect = QRect(10, h - _ITEM_H - 14, w - 20, _ITEM_H)
+
+            # Active background pill
+            if is_active:
+                pill = QPainterPath()
+                pill.addRoundedRect(QRectF(rect), 10, 10)
+                fill = QColor(_ACCENT)
+                fill.setAlpha(40)
+                p.fillPath(pill, fill)
+                # Left accent bar
+                bar = QPainterPath()
+                bar.addRoundedRect(QRectF(rect.left(), rect.top() + 6, 3, rect.height() - 12), 1.5, 1.5)
+                p.fillPath(bar, _ACCENT)
+            elif is_hovered:
+                pill = QPainterPath()
+                pill.addRoundedRect(QRectF(rect), 10, 10)
+                p.fillPath(pill, QColor(255, 255, 255, 8))
+
+            # Icon
+            p.setFont(icon_font)
+            if is_active:
+                p.setPen(_ACCENT)
+            elif is_hovered:
+                p.setPen(QColor(200, 200, 230))
+            else:
+                p.setPen(QColor(70, 68, 100))
+            p.drawText(QRect(rect.left() + 10, rect.top(), 28, rect.height()), Qt.AlignVCenter | Qt.AlignLeft, icon)
+
+            # Label
+            p.setFont(label_font)
+            if is_active:
+                p.setPen(QColor(230, 225, 255))
+            elif is_hovered:
+                p.setPen(QColor(180, 178, 210))
+            else:
+                p.setPen(QColor(70, 68, 100))
+            p.drawText(QRect(rect.left() + 42, rect.top(), rect.width() - 44, rect.height()), Qt.AlignVCenter | Qt.AlignLeft, label)
+
+    def mouseMoveEvent(self, e):
+        n = len(NAV_ITEMS)
+        hit = -1
+        for i in range(n):
+            rect = self._item_rect(i)
+            if i == n - 1:
+                rect = QRect(10, self.height() - _ITEM_H - 14, self.width() - 20, _ITEM_H)
+            if rect.contains(e.position().toPoint()):
+                hit = i
+                break
+        if hit != self._hovered:
+            self._hovered = hit
+            self.update()
+        super().mouseMoveEvent(e)
+
+    def leaveEvent(self, e):
+        self._hovered = -1
+        self.update()
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):
+        if e.button() != Qt.LeftButton:
+            return
+        n = len(NAV_ITEMS)
+        for i in range(n):
+            rect = self._item_rect(i)
+            if i == n - 1:
+                rect = QRect(10, self.height() - _ITEM_H - 14, self.width() - 20, _ITEM_H)
+            if rect.contains(e.position().toPoint()):
+                if self._nav_clicked:
+                    self._nav_clicked(i)
+                break
+        super().mousePressEvent(e)
+
+
+# ──────────────────────────────────────────────────────────────────────
+class _TitleBar(QWidget):
+    """Frameless draggable title bar."""
+    def __init__(self, win: QMainWindow) -> None:
+        super().__init__(win)
+        self._win = win
         self._drag_pos: QPoint | None = None
-        self.setFixedHeight(42)
+        self.setFixedHeight(40)
+        self.setAttribute(Qt.WA_StyledBackground)
         self.setObjectName("title_bar")
-        self.setAttribute(Qt.WA_StyledBackground, True)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(16, 0, 8, 0)
         lay.setSpacing(0)
 
-        # App name
-        self._title = QLabel("Media Library Manager")
-        self._title.setObjectName("title_bar_label")
-        lay.addWidget(self._title)
+        title = QLabel("Media Library Manager")
+        title.setObjectName("title_bar_label")
+        lay.addWidget(title)
         lay.addStretch()
 
-        # Window controls
-        for symbol, name, slot in (
-            ("─", "min",   parent.showMinimized),
+        for sym, name, slot in (
+            ("─", "min",   win.showMinimized),
             ("□", "max",   self._toggle_max),
-            ("✕", "close", parent.close),
+            ("✕", "close", win.close),
         ):
-            btn = QPushButton(symbol)
+            btn = QPushButton(sym)
             btn.setObjectName(f"wc_{name}")
-            btn.setFixedSize(36, 36)
+            btn.setFixedSize(34, 34)
             btn.setCursor(Qt.PointingHandCursor)
             btn.clicked.connect(slot)
             lay.addWidget(btn)
 
-    def _toggle_max(self) -> None:
-        if self._win.isMaximized():
-            self._win.showNormal()
-        else:
-            self._win.showMaximized()
+    def _toggle_max(self):
+        self._win.showNormal() if self._win.isMaximized() else self._win.showMaximized()
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
@@ -119,46 +274,13 @@ class _TitleBar(QWidget):
 
     def mouseDoubleClickEvent(self, e):
         self._toggle_max()
-        super().mouseDoubleClickEvent(e)
 
 
-class _SidebarButton(QPushButton):
-    """Icon-only sidebar button with tooltip = section name."""
-
-    def __init__(self, icon: str, tip: str, parent=None) -> None:
-        super().__init__(icon, parent)
-        self.setObjectName("sidebar_btn")
-        self.setCheckable(True)
-        self.setFixedSize(52, 52)
-        self.setToolTip(tip)
-        self.setCursor(Qt.PointingHandCursor)
-        f = QFont("Segoe UI Symbol", 18)
-        self.setFont(f)
-
-
-class _GlowWidget(QWidget):
-    """Decorative ambient glow blob painted behind the content area."""
-
-    def paintEvent(self, _):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        cx, cy = self.width() // 2, self.height() // 3
-        r = min(self.width(), self.height()) * 0.70
-        grad = QLinearGradient(cx - r, cy - r, cx + r, cy + r)
-        grad.setColorAt(0.0, QColor(124, 111, 255, 18))
-        grad.setColorAt(0.5, QColor(80,  60, 220, 10))
-        grad.setColorAt(1.0, QColor(0,   0,   0,   0))
-        p.setBrush(QBrush(grad))
-        p.setPen(Qt.NoPen)
-        p.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
-
-
+# ──────────────────────────────────────────────────────────────────────
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        # Frameless window
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
-        self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setWindowTitle("Media Library Manager")
         self.setMinimumSize(1100, 680)
 
@@ -172,150 +294,113 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Custom title bar ───────────────────────────────────────────
+        # Title bar
         self._title_bar = _TitleBar(self)
         root.addWidget(self._title_bar)
 
-        # ── Alert banner ───────────────────────────────────────────────
+        # Alert banner
         self._alert_banner = QLabel("")
         self._alert_banner.setObjectName("alert_banner")
         self._alert_banner.setAlignment(Qt.AlignCenter)
         self._alert_banner.setVisible(False)
         root.addWidget(self._alert_banner)
 
-        # ── Body (sidebar + content) ───────────────────────────────────
+        # Body
         body = QWidget()
-        body_layout = QHBoxLayout(body)
-        body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(0)
+        body_lay = QHBoxLayout(body)
+        body_lay.setContentsMargins(0, 0, 0, 0)
+        body_lay.setSpacing(0)
 
-        # ── Icon sidebar ───────────────────────────────────────────────
-        sidebar = QFrame()
-        sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(68)
-        side_layout = QVBoxLayout(sidebar)
-        side_layout.setContentsMargins(8, 16, 8, 16)
-        side_layout.setSpacing(4)
-        side_layout.setAlignment(Qt.AlignTop)
+        # Hero sidebar
+        self._sidebar = _HeroSidebar()
+        self._sidebar._nav_clicked = self.switch_view
+        body_lay.addWidget(self._sidebar)
 
-        # Logo mark
-        logo = QLabel("◈")
-        logo.setObjectName("sidebar_logo")
-        logo.setAlignment(Qt.AlignCenter)
-        logo.setFixedHeight(48)
-        side_layout.addWidget(logo)
+        # Right panel
+        right = QWidget()
+        right.setObjectName("right_panel")
+        right_lay = QVBoxLayout(right)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setSpacing(0)
 
-        # Divider
-        div = QFrame()
-        div.setFrameShape(QFrame.HLine)
-        div.setObjectName("sidebar_divider")
-        div.setFixedHeight(1)
-        side_layout.addWidget(div)
-        side_layout.addSpacing(8)
-
-        self.stack = QStackedWidget()
-        self.nav_buttons: list[QPushButton] = []
-
-        for index, (icon, tip, ViewClass) in enumerate(NAV_ITEMS):
-            view = ViewClass()
-            self.stack.addWidget(view)
-            btn = _SidebarButton(icon, tip)
-            btn.clicked.connect(lambda checked, i=index: self.switch_view(i))
-            side_layout.addWidget(btn, alignment=Qt.AlignHCenter)
-            self.nav_buttons.append(btn)
-            # Push Settings to the bottom
-            if index == len(NAV_ITEMS) - 2:   # before Settings
-                side_layout.addStretch()
-
-        body_layout.addWidget(sidebar)
-
-        # ── Right panel (top bar + glow + content stack) ──────────────
-        right_panel = QWidget()
-        right_panel.setObjectName("right_panel")
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(0)
-
-        # Top bar: search
+        # Top bar
         top_bar = QWidget()
         top_bar.setObjectName("top_bar")
-        top_bar.setFixedHeight(52)
-        top_bar_layout = QHBoxLayout(top_bar)
-        top_bar_layout.setContentsMargins(20, 6, 20, 6)
-        top_bar_layout.setSpacing(12)
+        top_bar.setFixedHeight(50)
+        tb_lay = QHBoxLayout(top_bar)
+        tb_lay.setContentsMargins(20, 6, 20, 6)
+        tb_lay.setSpacing(14)
+
+        # Breadcrumb label (updates with active section)
+        self._breadcrumb = QLabel("Dashboard")
+        self._breadcrumb.setStyleSheet(
+            "color: #30304a; font-size: 11px; font-weight: 600;"
+            "letter-spacing: 0.5px; background: transparent;"
+        )
+        tb_lay.addWidget(self._breadcrumb)
+
+        tb_lay.addStretch()
+
+        # Stack & nav buttons (nav_buttons kept for GlobalSearchBar compatibility)
+        self.stack = QStackedWidget()
+        self.nav_buttons: list[QPushButton] = []
+        for index, (icon, label, ViewClass) in enumerate(NAV_ITEMS):
+            view = ViewClass()
+            self.stack.addWidget(view)
+            # Dummy invisible button so GlobalSearchBar still works
+            btn = QPushButton()
+            btn.setCheckable(True)
+            btn.setVisible(False)
+            self.nav_buttons.append(btn)
 
         self._search_bar = GlobalSearchBar(self.stack, self.nav_buttons)
-        self._search_bar.setFixedHeight(38)
-        top_bar_layout.addWidget(self._search_bar, 1)
+        self._search_bar.setFixedHeight(36)
+        tb_lay.addWidget(self._search_bar, 1)
 
         self._activity_label = QLabel("Ready")
-        self._activity_label.setObjectName("muted")
-        self._activity_label.setStyleSheet("font-size: 11px; min-width: 80px;")
-        top_bar_layout.addWidget(self._activity_label)
+        self._activity_label.setStyleSheet(
+            "color: #303048; font-size: 11px; background: transparent;"
+        )
+        tb_lay.addWidget(self._activity_label)
 
         self._progress_bar = QProgressBar()
-        self._progress_bar.setFixedWidth(120)
-        self._progress_bar.setFixedHeight(4)
+        self._progress_bar.setFixedWidth(100)
+        self._progress_bar.setFixedHeight(3)
         self._progress_bar.setRange(0, 100)
-        self._progress_bar.setValue(0)
         self._progress_bar.setVisible(False)
         self._progress_bar.setTextVisible(False)
-        top_bar_layout.addWidget(self._progress_bar)
+        tb_lay.addWidget(self._progress_bar)
 
-        right_layout.addWidget(top_bar)
+        right_lay.addWidget(top_bar)
 
-        # Thin separator
-        top_sep = QFrame()
-        top_sep.setFrameShape(QFrame.HLine)
-        top_sep.setObjectName("top_separator")
-        right_layout.addWidget(top_sep)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setObjectName("top_separator")
+        right_lay.addWidget(sep)
 
-        # Content stack (with ambient glow behind it)
-        content_wrapper = QWidget()
-        content_wrapper.setObjectName("content_wrapper")
-        cw_layout = QVBoxLayout(content_wrapper)
-        cw_layout.setContentsMargins(0, 0, 0, 0)
-        cw_layout.setSpacing(0)
-
-        self._glow = _GlowWidget(content_wrapper)
-        self._glow.setGeometry(0, 0, 600, 400)
-        self._glow.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self._glow.lower()
-
-        cw_layout.addWidget(self.stack, 1)
-        right_layout.addWidget(content_wrapper, 1)
-
-        body_layout.addWidget(right_panel, 1)
+        right_lay.addWidget(self.stack, 1)
+        body_lay.addWidget(right, 1)
         root.addWidget(body, 1)
 
-        # ── Status bar ─────────────────────────────────────────────────
-        status_bar = QFrame()
-        status_bar.setObjectName("status_bar")
-        status_bar.setFixedHeight(26)
-        sb_layout = QHBoxLayout(status_bar)
-        sb_layout.setContentsMargins(16, 0, 16, 0)
-        sb_layout.setSpacing(0)
+        # Status bar
+        status = QFrame()
+        status.setObjectName("status_bar")
+        status.setFixedHeight(24)
+        sb_lay = QHBoxLayout(status)
+        sb_lay.setContentsMargins(16, 0, 16, 0)
         self._status_label = QLabel("Media Library Manager")
         self._status_label.setObjectName("status_label")
-        sb_layout.addWidget(self._status_label)
-        sb_layout.addStretch()
-        ver = QLabel("v1.0.0")
-        ver.setObjectName("status_label")
-        sb_layout.addWidget(ver)
-        root.addWidget(status_bar)
+        sb_lay.addWidget(self._status_label)
+        sb_lay.addStretch()
+        sb_lay.addWidget(QLabel("v1.0.0"))
+        root.addWidget(status)
 
-        self._active_workers: int = 0
-
+        self._active_workers = 0
         density = settings.get("ui_row_density", "comfortable")
         self._row_height = 20 if density == "compact" else 28
 
         self._check_startup_health()
         self.switch_view(0)
-
-    def resizeEvent(self, e):
-        super().resizeEvent(e)
-        if hasattr(self, '_glow'):
-            self._glow.setGeometry(0, 0, self.width(), self.height() // 2)
 
     def _check_startup_health(self) -> None:
         try:
@@ -327,13 +412,12 @@ class MainWindow(QMainWindow):
             count = row["n"] if row else 0
             if count > 0:
                 self._alert_banner.setText(
-                    f"⚠  {count} file(s) flagged as missing since last scan. "
-                    "Go to Health to review.  [Click to dismiss]"
+                    f"⚠  {count} missing file(s) since last scan — check Health  [click to dismiss]"
                 )
                 self._alert_banner.setVisible(True)
                 self._alert_banner.mousePressEvent = lambda _: self._alert_banner.setVisible(False)
         except Exception as exc:
-            log.warning("Startup health check failed: %s", exc)
+            log.warning("Startup health check: %s", exc)
 
     def track_worker(self, worker: QThread, task_label: str = "Working…") -> None:
         self._active_workers += 1
@@ -342,16 +426,16 @@ class MainWindow(QMainWindow):
         self._progress_bar.setVisible(True)
         if hasattr(worker, "progress"):
             worker.progress.connect(self._on_worker_progress)
-        for signal_name in ("finished", "finished_scan", "finished_build",
-                            "finished_apply", "finished_undo", "finished_export",
-                            "finished_check", "failed"):
-            sig = getattr(worker, signal_name, None)
+        for sig_name in ("finished", "finished_scan", "finished_build",
+                         "finished_apply", "finished_undo", "finished_export",
+                         "finished_check", "failed"):
+            sig = getattr(worker, sig_name, None)
             if sig is not None:
-                sig.connect(lambda *_: self._on_worker_done(task_label))
+                sig.connect(lambda *_: self._on_worker_done())
                 break
 
     def show_alert(self, message: str) -> None:
-        self._alert_banner.setText(message + "  [Click to dismiss]")
+        self._alert_banner.setText(message + "  [click to dismiss]")
         self._alert_banner.setVisible(True)
         self._alert_banner.mousePressEvent = lambda _: self._alert_banner.setVisible(False)
 
@@ -363,7 +447,7 @@ class MainWindow(QMainWindow):
             self._progress_bar.setRange(0, total)
             self._progress_bar.setValue(done)
 
-    def _on_worker_done(self, task_label: str) -> None:
+    def _on_worker_done(self) -> None:
         self._active_workers = max(0, self._active_workers - 1)
         if self._active_workers == 0:
             self._progress_bar.setVisible(False)
@@ -373,8 +457,11 @@ class MainWindow(QMainWindow):
 
     def switch_view(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
+        self._sidebar.set_active(index)
         for i, btn in enumerate(self.nav_buttons):
             btn.setChecked(i == index)
+        _, label, _ = NAV_ITEMS[index]
+        self._breadcrumb.setText(label.upper())
         current = self.stack.currentWidget()
         if hasattr(current, "load_rows"):
             current.load_rows()
