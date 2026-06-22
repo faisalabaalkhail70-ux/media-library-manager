@@ -1,42 +1,45 @@
 # Atlas — Media Library Manager
 
-A desktop application for managing local video libraries. Built with **Python + PySide6 + SQLite**.
-
-> **Privacy notice:** The `data/` folder is intentionally excluded from version control via `.gitignore`. It is created automatically on first launch and stores only local data on your own device — nothing is shared or uploaded.
+A local desktop application for organising, scanning, and managing your personal video collection.
+Built with **Python 3.11 · PySide6 · SQLite**. No internet connection required to run — TMDB is used only when you choose to fetch metadata.
 
 ---
 
-## Features
+## What It Does
 
-- Scan local directories for video files (`.mkv`, `.mp4`, `.avi`, `.m4v`, `.mov`, `.wmv`, `.ts`, `.webm`, `.flv`, `.vob`)
-- Auto-match movies and TV shows via the [TMDB API](https://www.themoviedb.org/)
-- Probe video metadata using `ffprobe`
-- Detect exact and fuzzy duplicate files
-- Bulk rename with template patterns (`{Title}`, `{Year}`, `{Season:02}`, `{Episode:02}`)
-- Health-check your library for missing or corrupt files
-- Export reports to CSV, Excel, or PDF
-- Full undo ledger for all file operations
+| Feature | Description |
+|---|---|
+| **Scanner** | Walks your local folders and discovers video files (`.mkv`, `.mp4`, `.avi`, `.mov`, `.m4v`, `.wmv`, `.ts`, `.webm`, `.flv`, `.vob`) |
+| **Library & Movies & Shows** | Browse all discovered files; shows are tracked by season and episode |
+| **TMDB Metadata** | Auto-matches files to movies or TV shows using the TMDB API; stores poster, plot, rating, genres |
+| **Missing Episodes** | Compares your local files against TMDB season data and highlights what you don't have |
+| **Duplicates** | Finds exact duplicates (same size + hash) and possible duplicates (name + duration + size similarity) |
+| **Rename** | Bulk rename files using configurable templates: `{Title}`, `{Year}`, `{Season:02}`, `{Episode:02}`, `{Resolution}`, `{Ext}` |
+| **Health Check** | Flags 0-byte files, unusually small files, missing-on-disk files, and unprobed files |
+| **Reports** | Export your library, missing episodes, or duplicate groups to **CSV**, **Excel**, or **PDF** |
+| **Dashboard** | Overview stats: total files, movies, shows, storage size, watch time, top resolutions and codecs |
+| **Undo** | Every rename operation is logged in an action ledger and can be reversed |
 
 ---
 
 ## Requirements
 
-| Requirement | Version |
+| Requirement | Details |
 |---|---|
-| Python | 3.11+ |
-| ffprobe | Any recent ffmpeg build |
-| TMDB API key | Free at [themoviedb.org](https://www.themoviedb.org/settings/api) |
+| Python | 3.11 or newer |
+| ffprobe | Part of any standard [ffmpeg](https://ffmpeg.org/download.html) installation; must be on `PATH` |
+| TMDB API key | Free — create one at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api) |
 
 ---
 
 ## Installation
 
 ```bash
-# 1. Clone the repository
+# 1. Clone
 git clone https://github.com/faisalabaalkhail70-ux/media-library-manager.git
 cd media-library-manager
 
-# 2. Create and activate a virtual environment
+# 2. Create virtual environment
 python -m venv .venv
 
 # Windows
@@ -48,47 +51,54 @@ source .venv/bin/activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Run the app
+# 4. Launch
 python main.py
 ```
 
-On first launch Atlas will automatically:
-- Create the `data/` folder
-- Initialise a fresh, empty `data/app.db` SQLite database
-- Create `data/logs/` and `data/exports/` directories
-
-**No configuration file is needed.** The database is created from scratch for every new user.
+On first launch the app automatically creates a fresh, empty database and all required folders under `data/`. Nothing needs to be configured in advance.
 
 ---
 
 ## First-Time Setup (inside the app)
 
-1. Open **Settings** and paste your TMDB API key.
-2. Go to **Directories** and add your media folders.
-3. Click **Scan** to discover your files.
-4. Use **Match Metadata** to link files to TMDB entries.
+1. **Settings** → enter your TMDB API key and save.
+2. **Scanner** → add one or more local media directories and click **Scan**.
+3. Once scanning is done, use **Match Metadata** to link files to TMDB entries.
+4. Use **Shows → Check Missing Episodes** to compare against TMDB season data.
 
 ---
 
-## Data Storage — Privacy by Design
+## Data & Privacy
 
-All data Atlas stores lives exclusively in the `data/` folder **on your local machine**:
+All data is stored **only on your own machine** inside the `data/` folder:
 
-| Path | Contents |
+```
+data/
+├── app.db          ← SQLite database (your library, settings, API key)
+├── logs/
+│   └── atlas.log   ← Rotating log file (max 5 MB × 3 backups)
+└── exports/        ← CSV / Excel / PDF files you generate
+```
+
+This folder is listed in `.gitignore` — it is never committed to Git or uploaded anywhere.
+Each person who clones the project starts with a completely empty database and enters their own TMDB key.
+
+---
+
+## Rename Templates
+
+The Rename view accepts these tokens:
+
+| Token | Replaced with |
 |---|---|
-| `data/app.db` | SQLite database (your media library, settings, API key) |
-| `data/logs/atlas.log` | Rotating application log |
-| `data/exports/` | CSV / Excel / PDF exports you generate |
+| `{Title}` | Movie or show title from TMDB |
+| `{Year}` | Release year |
+| `{Season:02}` | Season number, zero-padded |
+| `{Episode:02}` | Episode number, zero-padded |
+| `{Resolution}` | e.g. `1920x1080` |
+| `{Ext}` | File extension including the dot |
 
-This folder is listed in `.gitignore` and will **never** be committed to or shared via Git. Each person who downloads the project starts with a completely empty database.
-
----
-
-## TMDB API Key — Security Notes
-
-- Your API key is stored inside `data/app.db` — a local file that only you can access.
-- It is sent to TMDB using an `Authorization: Bearer` header and is **never** written to URLs, logs, or any file outside `data/`.
-- If you believe your key has been exposed, revoke it immediately at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api) and generate a new one.
+Example template: `{Title} ({Year}) S{Season:02}E{Episode:02}{Ext}`
 
 ---
 
@@ -105,22 +115,18 @@ pytest tests/ -v
 
 ```
 mlm/
-├── app/          # Bootstrap, config, paths
-├── db/           # SQLite schema + repository layer
-├── domain/       # Domain models
-├── integrations/ # TMDB API client, ffprobe client
-├── parsing/      # Media filename parser
-├── services/     # Business logic
-├── ui/           # PySide6 views and widgets
-├── utils/        # Hashing, logging, filesystem helpers
-└── workers/      # QThread background workers
-data/             # AUTO-CREATED on first run — not in Git
-tests/            # pytest test suite
-main.py           # Entry point
+├── app/            Bootstrap, config, paths
+├── db/             SQLite schema, migrations, repository layer
+├── integrations/   TMDB API client, ffprobe client
+├── parsing/        Filename parser (title, year, season, episode)
+├── services/       Business logic (scan, metadata, health, duplicates, rename, export)
+├── ui/
+│   ├── views/      One QWidget per sidebar section
+│   ├── models/     Qt table models
+│   └── styles.py   Global stylesheet
+├── utils/          Hashing (MD5), logging, filesystem helpers
+└── workers/        QThread background workers (scan, hash, metadata, rename, undo)
+data/               Auto-created on first run — not in Git
+tests/              pytest test suite
+main.py             Entry point
 ```
-
----
-
-## License
-
-MIT
