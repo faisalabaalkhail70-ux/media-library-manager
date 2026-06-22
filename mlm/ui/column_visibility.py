@@ -1,13 +1,20 @@
-"""Column visibility dialog and per-table persistence.
+"""Column visibility AND width persistence helpers.
 
-Usage in any view::
+Usage::
 
-    from mlm.ui.column_visibility import ColumnVisibilityButton
-    btn = ColumnVisibilityButton(self.table, "movies", toolbar_layout)
+    from mlm.ui.column_visibility import (
+        ColumnVisibilityDialog, apply_saved_visibility,
+        save_column_widths, restore_column_widths, install_width_autosave,
+    )
 
-This adds a ⚙ Columns button that opens a checkbox dialog. The user's
-choices are saved to app_settings under the key `col_vis_{table_name}`
-and restored on next launch.
+    # On view init
+    restore_column_widths(self.table, "shows")
+    install_width_autosave(self.table, "shows")   # auto-saves on every drag
+    apply_saved_visibility(self.table, "shows")
+
+All state is stored in app_settings:
+  col_vis_{name}    → JSON bool list  (visibility)
+  col_wid_{name}    → JSON int list   (pixel widths)
 """
 import json
 from PySide6.QtWidgets import (
@@ -17,6 +24,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 from mlm.db.repositories.settings_repo import SettingsRepository
 
+
+# ──────────────────────────────────────────────────────────────────────────────────
+# Column visibility
+# ──────────────────────────────────────────────────────────────────────────────────
 
 class ColumnVisibilityDialog(QDialog):
     def __init__(self, table, table_name: str, parent=None) -> None:
@@ -96,3 +107,54 @@ def apply_saved_visibility(table, table_name: str) -> None:
                 table.setColumnHidden(col, not visible)
     except Exception:
         pass
+
+
+# ──────────────────────────────────────────────────────────────────────────────────
+# Column width persistence
+# ──────────────────────────────────────────────────────────────────────────────────
+
+def save_column_widths(table, table_name: str) -> None:
+    """Snapshot current column pixel widths to settings."""
+    header = table.horizontalHeader()
+    widths = [header.sectionSize(i) for i in range(header.count())]
+    SettingsRepository().set(f"col_wid_{table_name}", json.dumps(widths))
+
+
+def restore_column_widths(table, table_name: str) -> None:
+    """Restore previously saved column widths (if count matches)."""
+    raw = SettingsRepository().get(f"col_wid_{table_name}", "")
+    if not raw:
+        return
+    try:
+        widths = json.loads(raw)
+    except Exception:
+        return
+    header = table.horizontalHeader()
+    if len(widths) != header.count():
+        return
+    # Temporarily disable stretch-last so widths are honoured exactly
+    header.setStretchLastSection(False)
+    for i, w in enumerate(widths):
+        if w > 0:
+            header.resizeSection(i, w)
+    header.setStretchLastSection(True)
+
+
+def install_width_autosave(table, table_name: str) -> None:
+    """Connect sectionResized so every drag automatically persists widths.
+
+    Uses a single-shot debounce: rapid consecutive resize events only
+    trigger one DB write (after the user stops dragging).
+    """
+    from PySide6.QtCore import QTimer
+    _timer = QTimer()
+    _timer.setSingleShot(True)
+    _timer.setInterval(400)   # 400 ms debounce
+    _timer.timeout.connect(lambda: save_column_widths(table, table_name))
+
+    def _on_resize(_logical, _old, _new):
+        _timer.start()   # restart debounce on every resize event
+
+    table.horizontalHeader().sectionResized.connect(_on_resize)
+    # Keep timer alive by parenting it to the table widget
+    _timer.setParent(table)

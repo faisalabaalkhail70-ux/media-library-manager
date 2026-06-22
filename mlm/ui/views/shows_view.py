@@ -6,7 +6,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QSortFilterProxyModel
 from mlm.db.connection import get_connection
 from mlm.ui.models.shows_model import ShowsTableModel
-from mlm.ui.column_visibility import ColumnVisibilityDialog, apply_saved_visibility
+from mlm.ui.column_visibility import (
+    ColumnVisibilityDialog, apply_saved_visibility,
+    restore_column_widths, install_width_autosave,
+)
 from mlm.ui.filter_panel import FilterPanel
 from mlm.ui.grid_view import PosterGridWidget
 from mlm.ui.views.entity_detail_panel import EntityDetailPanel
@@ -33,7 +36,7 @@ class ShowsView(QWidget):
         title_lbl.setObjectName("h1")
         layout.addWidget(title_lbl)
 
-        # ── Toolbar ─────────────────────────────────────────────────
+        # ── Toolbar
         toolbar = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search by title...")
@@ -53,7 +56,6 @@ class ShowsView(QWidget):
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.load_rows)
 
-        # View toggle
         self._view_toggle = QPushButton("\u22f9 Grid View")
         self._view_toggle.setCheckable(True)
         self._view_toggle.clicked.connect(self._toggle_view)
@@ -71,31 +73,29 @@ class ShowsView(QWidget):
         toolbar.addWidget(self.refresh_btn)
         layout.addLayout(toolbar)
 
-        # ── Filter panel ────────────────────────────────────────────
+        # ── Filters
         self._filters = FilterPanel(media_type="show")
         self._filters.changed.connect(self._apply_all)
         layout.addWidget(self._filters)
 
-        # ── Stacked: table | grid ─────────────────────────────────────
+        # ── Stacked: table | grid
         self._stack = QStackedWidget()
 
-        # Table page (index 0)
         self.table = QTableView()
         self.table.setModel(self._proxy)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setAlternatingRowColors(True)
+        self.table.setAlternatingRowColors(False)   # off — our model owns all colors
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setSortIndicatorShown(True)
         self.table.doubleClicked.connect(self._open_episode_detail)
-        self._stack.addWidget(self.table)   # index 0
+        self._stack.addWidget(self.table)
 
-        # Grid page (index 1)
         self._grid = PosterGridWidget()
         self._grid.card_clicked.connect(self._open_entity_detail)
-        self._stack.addWidget(self._grid)   # index 1
+        self._stack.addWidget(self._grid)
 
         layout.addWidget(self._stack)
 
@@ -105,6 +105,8 @@ class ShowsView(QWidget):
 
         self.load_rows()
         apply_saved_visibility(self.table, "shows")
+        restore_column_widths(self.table, "shows")
+        install_width_autosave(self.table, "shows")
 
     def load_rows(self) -> None:
         with get_connection() as conn:

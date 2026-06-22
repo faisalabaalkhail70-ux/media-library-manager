@@ -13,13 +13,10 @@ INVALID_CHARS = r'\/:*?"<>|'
 
 
 def sanitize_filename(name: str) -> str:
-    """Strip filesystem-illegal characters from *name*."""
     return "".join(c for c in name if c not in INVALID_CHARS).strip()
 
 
 class RenameService:
-    """Preview and apply bulk file renames tracked in the action ledger."""
-
     def __init__(self, actions_repo: ActionsRepository | None = None) -> None:
         self.actions_repo = actions_repo or ActionsRepository()
 
@@ -44,19 +41,19 @@ class RenameService:
         return sanitize_filename(new_name)
 
     def list_renamable_files(self, limit: int = 5000) -> list[dict]:
-        """Return files eligible for renaming (not removed)."""
+        """Return files eligible for renaming, including media_type for filtering."""
         with get_connection() as conn:
             rows = conn.execute(
                 """
                 SELECT
                     mf.id, mf.file_path, mf.file_name, mf.extension, mf.resolution,
-                    me.title, me.release_year,
+                    me.title, me.release_year, me.media_type,
                     ep.season_number, ep.episode_number
                 FROM media_files mf
                 LEFT JOIN media_entities me ON me.id = mf.entity_id
                 LEFT JOIN episodes ep ON ep.media_file_id = mf.id
                 WHERE mf.removed_at IS NULL
-                ORDER BY mf.id DESC
+                ORDER BY me.media_type, me.title, ep.season_number, ep.episode_number
                 LIMIT ?
                 """,
                 (limit,),
@@ -64,12 +61,12 @@ class RenameService:
         return [dict(r) for r in rows]
 
     def build_preview(self, template: str) -> list[dict]:
-        """Return a list of rename proposals for *template* without touching the filesystem."""
+        """Return rename proposals; each row includes media_type for UI filtering."""
         previews = []
         for row in self.list_renamable_files():
             old_path = row["file_path"]
             old_name = row["file_name"]
-            folder = os.path.dirname(old_path)
+            folder   = os.path.dirname(old_path)
             new_name = self._format_template(row, template)
             new_path = os.path.join(folder, new_name)
 
@@ -84,20 +81,16 @@ class RenameService:
 
             previews.append({
                 "media_file_id": row["id"],
-                "old_name": old_name,
-                "old_path": old_path,
-                "new_name": new_name,
-                "new_path": new_path,
-                "status": status,
+                "media_type":    row.get("media_type") or "",
+                "old_name":      old_name,
+                "old_path":      old_path,
+                "new_name":      new_name,
+                "new_path":      new_path,
+                "status":        status,
             })
         return previews
 
     def apply_preview(self, preview_rows: list[dict]) -> dict:
-        """Apply all ``'valid'`` rows from a preview batch.
-
-        Returns:
-            ``{"success": int, "failed": int}``
-        """
         success = failed = 0
         with get_connection() as conn:
             for row in preview_rows:
@@ -129,7 +122,7 @@ class RenameService:
                     )
                     self.actions_repo.mark_done(action_id)
                     success += 1
-                    log.info("Renamed: %s → %s", row["old_path"], row["new_path"])
+                    log.info("Renamed: %s \u2192 %s", row["old_path"], row["new_path"])
                 except Exception as exc:
                     self.actions_repo.mark_failed(action_id, str(exc))
                     failed += 1

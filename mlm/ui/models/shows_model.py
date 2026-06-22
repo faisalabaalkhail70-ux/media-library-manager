@@ -1,4 +1,4 @@
-"""Qt table model for the TV Shows view — with semantic color coding."""
+"""Qt table model for the TV Shows view — semantic color coding on every column."""
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
 
@@ -70,8 +70,8 @@ class ShowsTableModel(QAbstractTableModel):
         if not index.isValid():
             return None
 
-        row = self._rows[index.row()]
-        col = index.column()
+        row  = self._rows[index.row()]
+        col  = index.column()
 
         ep_have  = row.get("episodes_have")    or 0
         ep_miss  = row.get("episodes_missing") or 0
@@ -79,6 +79,13 @@ class ShowsTableModel(QAbstractTableModel):
         s_miss   = row.get("seasons_missing")  or 0
         ep_total = ep_have + ep_miss
         pct      = round(ep_have / ep_total * 100) if ep_total > 0 else 0
+
+        # ── Rating: round to 1 decimal place ─────────────────────────────────────
+        raw_rating = row.get("rating")
+        try:
+            rating_display = f"{float(raw_rating):.1f}"
+        except (TypeError, ValueError):
+            rating_display = ""
 
         if role == Qt.DisplayRole:
             return [
@@ -89,30 +96,33 @@ class ShowsTableModel(QAbstractTableModel):
                 str(ep_have) if ep_have else "—",
                 str(ep_miss) if ep_miss else "—",
                 f"{pct}%",
-                str(row.get("rating", "") or ""),
+                rating_display,
                 row.get("genres", "") or "",
             ][col]
 
         if role == Qt.ForegroundRole:
-            # Seasons / Episodes Missing → red if any, muted if zero
+            # ── Always return an explicit color — never None — so Qt's
+            # alternating-row palette never overrides our choices.
+            if col == self._COL_TITLE:
+                return _NORMAL
+            if col == self._COL_YEAR:
+                return _MUTED
+            if col == self._COL_S_HAVE:
+                return _GREEN if s_have > 0 else _MUTED
             if col == self._COL_S_MISS:
-                return _RED if s_miss > 0 else _MUTED
-            if col == self._COL_E_MISS:
-                return _RED if ep_miss > 0 else _MUTED
-            # Seasons / Episodes Have → green if non-zero, muted otherwise
-            if col in (self._COL_S_HAVE, self._COL_E_HAVE):
+                return _RED   if s_miss > 0 else _MUTED
+            if col == self._COL_E_HAVE:
                 return _GREEN if ep_have > 0 else _MUTED
-            # Completion % → traffic light
+            if col == self._COL_E_MISS:
+                return _RED   if ep_miss > 0 else _MUTED
             if col == self._COL_PCT:
                 if pct == 100:  return _GREEN
                 if pct >= 75:   return _YELLOW
                 if pct >= 40:   return _AMBER
                 return _RED
-            # Rating → green/yellow/red by score
             if col == self._COL_RATING:
-                return _rating_color(row.get("rating"))
-            # Year, Genres → muted
-            if col in (self._COL_YEAR, self._COL_GENRES):
+                return _rating_color(raw_rating)
+            if col == self._COL_GENRES:
                 return _MUTED
             return _NORMAL
 
