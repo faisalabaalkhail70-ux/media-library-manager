@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton,
     QFileDialog, QLineEdit, QMessageBox, QComboBox, QProgressBar,
-    QListWidget, QListWidgetItem, QGroupBox
+    QListWidget, QListWidgetItem, QGroupBox, QPlainTextEdit
 )
 from PySide6.QtCore import Qt
 from mlm.app.config import AppConfig
@@ -25,7 +25,7 @@ class ScannerView(QWidget):
         title.setObjectName("h1")
         layout.addWidget(title)
 
-        # ── Add Directory ─────────────────────────────────────────
+        # ── Add Directory ─────────────────────────────────────────────────
         add_group = QGroupBox("Add Directory")
         add_layout = QVBoxLayout(add_group)
 
@@ -52,7 +52,7 @@ class ScannerView(QWidget):
 
         layout.addWidget(add_group)
 
-        # ── Registered Directories ────────────────────────────────
+        # ── Registered Directories ──────────────────────────────────────
         dirs_group = QGroupBox("Registered Directories")
         dirs_layout = QVBoxLayout(dirs_group)
 
@@ -72,35 +72,40 @@ class ScannerView(QWidget):
 
         layout.addWidget(dirs_group)
 
-        # ── Scan Exclusions ───────────────────────────────────────
+        # ── Excluded Folder Names ────────────────────────────────────────
         excl_group = QGroupBox("Excluded Folder Names")
         excl_layout = QVBoxLayout(excl_group)
 
         excl_note = QLabel(
-            "Folders with these names will be skipped during scan (case-insensitive, one per line):"
+            "Folders with these names will be skipped during scan "
+            "(case-insensitive, one per line)."
+            "\nYou can also exclude a specific subfolder path using the browser below."
         )
         excl_note.setObjectName("muted")
         excl_note.setWordWrap(True)
         excl_layout.addWidget(excl_note)
 
-        from PySide6.QtWidgets import QPlainTextEdit
         self.excl_edit = QPlainTextEdit()
         self.excl_edit.setFixedHeight(100)
-        self.excl_edit.setPlainText(
-            "\n".join(sorted(DEFAULT_EXCLUDED_FOLDERS))
-        )
+        self.excl_edit.setPlainText("\n".join(sorted(DEFAULT_EXCLUDED_FOLDERS)))
         excl_layout.addWidget(self.excl_edit)
 
         excl_btns = QHBoxLayout()
         reset_excl_btn = QPushButton("Reset to Defaults")
         reset_excl_btn.clicked.connect(self._reset_exclusions)
+
+        # NEW: browse a specific folder to exclude
+        browse_excl_btn = QPushButton("Exclude a Specific Folder…")
+        browse_excl_btn.clicked.connect(self._browse_excluded_folder)
+
         excl_btns.addWidget(reset_excl_btn)
+        excl_btns.addWidget(browse_excl_btn)
         excl_btns.addStretch()
         excl_layout.addLayout(excl_btns)
 
         layout.addWidget(excl_group)
 
-        # ── Progress ──────────────────────────────────────────────
+        # ── Progress ───────────────────────────────────────────────────
         self.status_label = QLabel("Idle.")
         self.status_label.setObjectName("muted")
         layout.addWidget(self.status_label)
@@ -111,10 +116,9 @@ class ScannerView(QWidget):
         layout.addWidget(self.progress)
 
         layout.addStretch()
-
         self._refresh_dirs_list()
 
-    # ── Helpers ───────────────────────────────────────────────────
+    # ── Helpers ────────────────────────────────────────────────
 
     def _get_exclusions(self) -> set[str]:
         lines = self.excl_edit.toPlainText().splitlines()
@@ -122,6 +126,18 @@ class ScannerView(QWidget):
 
     def _reset_exclusions(self) -> None:
         self.excl_edit.setPlainText("\n".join(sorted(DEFAULT_EXCLUDED_FOLDERS)))
+
+    def _browse_excluded_folder(self) -> None:
+        """Let the user pick any folder and append its full path to the exclusions list."""
+        path = QFileDialog.getExistingDirectory(self, "Select folder to exclude")
+        if not path:
+            return
+        existing = self.excl_edit.toPlainText().strip()
+        # Append only if not already listed
+        if path.lower() not in [ln.lower() for ln in existing.splitlines()]:
+            self.excl_edit.setPlainText(
+                (existing + "\n" + path).strip()
+            )
 
     def _refresh_dirs_list(self) -> None:
         self.dirs_list.clear()
@@ -134,7 +150,7 @@ class ScannerView(QWidget):
             item.setData(Qt.UserRole + 1, d["path"])
             self.dirs_list.addItem(item)
 
-    # ── Actions ───────────────────────────────────────────────────
+    # ── Actions ────────────────────────────────────────────────
 
     def browse_directory(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select media root")
@@ -147,8 +163,8 @@ class ScannerView(QWidget):
             QMessageBox.warning(self, "Nothing selected", "Select a directory first.")
             return
         dir_id = item.data(Qt.UserRole)
-        path = item.data(Qt.UserRole + 1)
-        reply = QMessageBox.question(
+        path   = item.data(Qt.UserRole + 1)
+        reply  = QMessageBox.question(
             self, "Remove Directory",
             f"Remove '{path}' from the library?\n\nFiles will NOT be deleted from disk.",
             QMessageBox.Yes | QMessageBox.No,
@@ -214,9 +230,9 @@ class ScannerView(QWidget):
     def on_finished(self, result: dict) -> None:
         self.progress.hide()
         self.scan_btn.setText("Add & Scan")
-        added = result["files_added"]
+        added   = result["files_added"]
         removed = result["files_removed"]
-        status = result["status"].capitalize()
+        status  = result["status"].capitalize()
         self.status_label.setText(
             f'{status}: {result["files_seen"]} seen, {added} added, {removed} removed.'
         )
