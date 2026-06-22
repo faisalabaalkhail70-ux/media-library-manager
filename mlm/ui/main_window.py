@@ -1,11 +1,31 @@
-"""Main application window — sidebar + stacked content + global search + activity bar."""
+"""Main application window — redesigned 2026 UI.
+
+Layout
+──────
+  ┌─────────────────────────────────────────────────────┐
+  │  Custom title bar  (drag, min/max/close)            │
+  ├──────────┬──────────────────────────────────────────┤
+  │          │  Top bar: search + activity              │
+  │  Icon    ├──────────────────────────────────────────┤
+  │  sidebar │  Page content (QStackedWidget)           │
+  │  (60px)  │                                          │
+  │          │                                          │
+  ├──────────┴──────────────────────────────────────────┤
+  │  Status bar                                         │
+  └─────────────────────────────────────────────────────┘
+
+Sidebar uses Unicode symbol icons + tooltip labels.
+No native window chrome — fully custom frame.
+"""
 import logging
 
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QPoint, QThread, QSize
+from PySide6.QtGui import QFont, QColor, QPainter, QLinearGradient, QBrush, QPen
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QMainWindow,
     QProgressBar, QPushButton,
-    QStackedWidget, QVBoxLayout, QWidget, QApplication
+    QStackedWidget, QVBoxLayout, QWidget, QApplication,
+    QSizePolicy, QGraphicsDropShadowEffect,
 )
 
 from mlm.db.repositories.settings_repo import SettingsRepository
@@ -26,30 +46,121 @@ from mlm.ui.views.settings_view     import SettingsView
 
 log = logging.getLogger(__name__)
 
+# (icon_glyph, tooltip_label, ViewClass)
 NAV_ITEMS = [
-    ("\U0001f3e0  Dashboard",    DashboardView),
-    ("\U0001f4c2  Scanner",      ScannerView),
-    ("\U0001f4da  Library",      LibraryView),
-    ("\U0001f3ac  Movies",       MoviesView),
-    ("\U0001f4fa  TV Shows",     ShowsView),
-    ("\U0001f4da  Collections",  CollectionsView),
-    ("\U0001f4cb  Watchlist",    WatchlistView),
-    ("\U0001f50d  Duplicates",   DuplicatesView),
-    ("\u270f\ufe0f  Rename",       RenameView),
-    ("\U0001fa7a  Health",       HealthView),
-    ("\U0001f4ca  Reports",      ReportsView),
-    ("\u2699\ufe0f  Settings",     SettingsView),
+    ("⌂",  "Dashboard",   DashboardView),
+    ("⊕",  "Scanner",     ScannerView),
+    ("▤",  "Library",     LibraryView),
+    ("▶",  "Movies",      MoviesView),
+    ("⊞",  "TV Shows",    ShowsView),
+    ("◫",  "Collections", CollectionsView),
+    ("♥",  "Watchlist",   WatchlistView),
+    ("⊜",  "Duplicates",  DuplicatesView),
+    ("✎",  "Rename",      RenameView),
+    ("✦",  "Health",      HealthView),
+    ("◈",  "Reports",     ReportsView),
+    ("⚙",  "Settings",    SettingsView),
 ]
 
-# Consistent content padding applied to the stack widget so every view
-# has breathing room from the sidebar without each view managing its own margins.
-_CONTENT_PADDING = 0   # views own their own top/left/right padding (24px)
+
+class _TitleBar(QWidget):
+    """Draggable custom title bar with min / max / close."""
+
+    def __init__(self, parent: QMainWindow) -> None:
+        super().__init__(parent)
+        self._win = parent
+        self._drag_pos: QPoint | None = None
+        self.setFixedHeight(42)
+        self.setObjectName("title_bar")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 0, 8, 0)
+        lay.setSpacing(0)
+
+        # App name
+        self._title = QLabel("Media Library Manager")
+        self._title.setObjectName("title_bar_label")
+        lay.addWidget(self._title)
+        lay.addStretch()
+
+        # Window controls
+        for symbol, name, slot in (
+            ("─", "min",   parent.showMinimized),
+            ("□", "max",   self._toggle_max),
+            ("✕", "close", parent.close),
+        ):
+            btn = QPushButton(symbol)
+            btn.setObjectName(f"wc_{name}")
+            btn.setFixedSize(36, 36)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(slot)
+            lay.addWidget(btn)
+
+    def _toggle_max(self) -> None:
+        if self._win.isMaximized():
+            self._win.showNormal()
+        else:
+            self._win.showMaximized()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self._drag_pos = e.globalPosition().toPoint() - self._win.frameGeometry().topLeft()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._drag_pos and e.buttons() == Qt.LeftButton:
+            self._win.move(e.globalPosition().toPoint() - self._drag_pos)
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        self._drag_pos = None
+        super().mouseReleaseEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        self._toggle_max()
+        super().mouseDoubleClickEvent(e)
+
+
+class _SidebarButton(QPushButton):
+    """Icon-only sidebar button with tooltip = section name."""
+
+    def __init__(self, icon: str, tip: str, parent=None) -> None:
+        super().__init__(icon, parent)
+        self.setObjectName("sidebar_btn")
+        self.setCheckable(True)
+        self.setFixedSize(52, 52)
+        self.setToolTip(tip)
+        self.setCursor(Qt.PointingHandCursor)
+        f = QFont("Segoe UI Symbol", 18)
+        self.setFont(f)
+
+
+class _GlowWidget(QWidget):
+    """Decorative ambient glow blob painted behind the content area."""
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        cx, cy = self.width() // 2, self.height() // 3
+        r = min(self.width(), self.height()) * 0.70
+        grad = QLinearGradient(cx - r, cy - r, cx + r, cy + r)
+        grad.setColorAt(0.0, QColor(124, 111, 255, 18))
+        grad.setColorAt(0.5, QColor(80,  60, 220, 10))
+        grad.setColorAt(1.0, QColor(0,   0,   0,   0))
+        p.setBrush(QBrush(grad))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(int(cx - r), int(cy - r), int(r * 2), int(r * 2))
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        # Frameless window
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setWindowTitle("Media Library Manager")
+        self.setMinimumSize(1100, 680)
 
         settings = SettingsRepository()
         theme = settings.get("ui_theme", "dark")
@@ -57,113 +168,141 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
+        # ── Custom title bar ───────────────────────────────────────────
+        self._title_bar = _TitleBar(self)
+        root.addWidget(self._title_bar)
 
-        # ── Health alert banner ─────────────────────────────────────────────
+        # ── Alert banner ───────────────────────────────────────────────
         self._alert_banner = QLabel("")
         self._alert_banner.setObjectName("alert_banner")
         self._alert_banner.setAlignment(Qt.AlignCenter)
         self._alert_banner.setVisible(False)
-        outer.addWidget(self._alert_banner)
+        root.addWidget(self._alert_banner)
+
+        # ── Body (sidebar + content) ───────────────────────────────────
+        body = QWidget()
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+
+        # ── Icon sidebar ───────────────────────────────────────────────
+        sidebar = QFrame()
+        sidebar.setObjectName("sidebar")
+        sidebar.setFixedWidth(68)
+        side_layout = QVBoxLayout(sidebar)
+        side_layout.setContentsMargins(8, 16, 8, 16)
+        side_layout.setSpacing(4)
+        side_layout.setAlignment(Qt.AlignTop)
+
+        # Logo mark
+        logo = QLabel("◈")
+        logo.setObjectName("sidebar_logo")
+        logo.setAlignment(Qt.AlignCenter)
+        logo.setFixedHeight(48)
+        side_layout.addWidget(logo)
+
+        # Divider
+        div = QFrame()
+        div.setFrameShape(QFrame.HLine)
+        div.setObjectName("sidebar_divider")
+        div.setFixedHeight(1)
+        side_layout.addWidget(div)
+        side_layout.addSpacing(8)
 
         self.stack = QStackedWidget()
         self.nav_buttons: list[QPushButton] = []
 
-        # ── Main area (sidebar + stack) ─────────────────────────────────
-        main_area = QWidget()
-        main_layout = QHBoxLayout(main_area)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(0)
-
-        # ── Sidebar ───────────────────────────────────────────────────────
-        sidebar = QFrame()
-        sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(220)
-        side_layout = QVBoxLayout(sidebar)
-        side_layout.setContentsMargins(12, 20, 12, 16)
-        side_layout.setSpacing(4)
-
-        logo = QLabel("Media Library\nManager")
-        logo.setObjectName("h1")
-        logo.setAlignment(Qt.AlignCenter)
-        logo.setStyleSheet("font-size: 15px; padding-bottom: 12px;")
-        side_layout.addWidget(logo)
-
-        divider = QFrame()
-        divider.setFrameShape(QFrame.HLine)
-        divider.setStyleSheet("color: #333; margin-bottom: 8px;")
-        side_layout.addWidget(divider)
-
-        for index, (label, ViewClass) in enumerate(NAV_ITEMS):
+        for index, (icon, tip, ViewClass) in enumerate(NAV_ITEMS):
             view = ViewClass()
             self.stack.addWidget(view)
-            btn = QPushButton(label)
-            btn.setObjectName("sidebar_btn")
-            btn.setCheckable(True)
+            btn = _SidebarButton(icon, tip)
             btn.clicked.connect(lambda checked, i=index: self.switch_view(i))
-            side_layout.addWidget(btn)
+            side_layout.addWidget(btn, alignment=Qt.AlignHCenter)
             self.nav_buttons.append(btn)
+            # Push Settings to the bottom
+            if index == len(NAV_ITEMS) - 2:   # before Settings
+                side_layout.addStretch()
 
-        side_layout.addStretch()
-        version_lbl = QLabel("v1.0.0")
-        version_lbl.setObjectName("muted")
-        version_lbl.setAlignment(Qt.AlignCenter)
-        version_lbl.setStyleSheet("font-size: 11px;")
-        side_layout.addWidget(version_lbl)
+        body_layout.addWidget(sidebar)
 
-        # ── Content area: add a left separator line between sidebar and views ──
-        sep = QFrame()
-        sep.setFrameShape(QFrame.VLine)
-        sep.setStyleSheet("color: #2c2c2c;")
+        # ── Right panel (top bar + glow + content stack) ──────────────
+        right_panel = QWidget()
+        right_panel.setObjectName("right_panel")
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
 
-        main_layout.addWidget(sidebar)
-        main_layout.addWidget(sep)
-        main_layout.addWidget(self.stack, 1)
+        # Top bar: search
+        top_bar = QWidget()
+        top_bar.setObjectName("top_bar")
+        top_bar.setFixedHeight(52)
+        top_bar_layout = QHBoxLayout(top_bar)
+        top_bar_layout.setContentsMargins(20, 6, 20, 6)
+        top_bar_layout.setSpacing(12)
 
-        # Search bar
         self._search_bar = GlobalSearchBar(self.stack, self.nav_buttons)
-        self._search_bar.setFixedHeight(44)
-        self._search_bar.setStyleSheet(
-            "background: #1a1a1a; border-bottom: 1px solid #2c2c2c;"
-        )
-
-        outer.addWidget(self._search_bar)
-        outer.addWidget(main_area, 1)
-
-        # ── Activity bar ───────────────────────────────────────────────
-        activity_bar = QFrame()
-        activity_bar.setObjectName("activity_bar")
-        activity_bar.setFixedHeight(32)
-        activity_bar.setStyleSheet(
-            "#activity_bar { background: #1a1a2e; border-top: 1px solid #2a2a3e; }"
-        )
-        bar_layout = QHBoxLayout(activity_bar)
-        bar_layout.setContentsMargins(12, 0, 12, 0)
-        bar_layout.setSpacing(10)
+        self._search_bar.setFixedHeight(38)
+        top_bar_layout.addWidget(self._search_bar, 1)
 
         self._activity_label = QLabel("Ready")
         self._activity_label.setObjectName("muted")
-        self._activity_label.setStyleSheet("font-size: 11px;")
+        self._activity_label.setStyleSheet("font-size: 11px; min-width: 80px;")
+        top_bar_layout.addWidget(self._activity_label)
 
         self._progress_bar = QProgressBar()
-        self._progress_bar.setFixedWidth(200)
-        self._progress_bar.setFixedHeight(14)
+        self._progress_bar.setFixedWidth(120)
+        self._progress_bar.setFixedHeight(4)
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(False)
         self._progress_bar.setTextVisible(False)
-        self._progress_bar.setStyleSheet(
-            "QProgressBar { background: #2a2a3e; border-radius: 7px; }"
-            "QProgressBar::chunk { background: #6c63ff; border-radius: 7px; }"
-        )
+        top_bar_layout.addWidget(self._progress_bar)
 
-        bar_layout.addWidget(self._activity_label)
-        bar_layout.addStretch()
-        bar_layout.addWidget(self._progress_bar)
-        outer.addWidget(activity_bar)
+        right_layout.addWidget(top_bar)
+
+        # Thin separator
+        top_sep = QFrame()
+        top_sep.setFrameShape(QFrame.HLine)
+        top_sep.setObjectName("top_separator")
+        right_layout.addWidget(top_sep)
+
+        # Content stack (with ambient glow behind it)
+        content_wrapper = QWidget()
+        content_wrapper.setObjectName("content_wrapper")
+        cw_layout = QVBoxLayout(content_wrapper)
+        cw_layout.setContentsMargins(0, 0, 0, 0)
+        cw_layout.setSpacing(0)
+
+        self._glow = _GlowWidget(content_wrapper)
+        self._glow.setGeometry(0, 0, 600, 400)
+        self._glow.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._glow.lower()
+
+        cw_layout.addWidget(self.stack, 1)
+        right_layout.addWidget(content_wrapper, 1)
+
+        body_layout.addWidget(right_panel, 1)
+        root.addWidget(body, 1)
+
+        # ── Status bar ─────────────────────────────────────────────────
+        status_bar = QFrame()
+        status_bar.setObjectName("status_bar")
+        status_bar.setFixedHeight(26)
+        sb_layout = QHBoxLayout(status_bar)
+        sb_layout.setContentsMargins(16, 0, 16, 0)
+        sb_layout.setSpacing(0)
+        self._status_label = QLabel("Media Library Manager")
+        self._status_label.setObjectName("status_label")
+        sb_layout.addWidget(self._status_label)
+        sb_layout.addStretch()
+        ver = QLabel("v1.0.0")
+        ver.setObjectName("status_label")
+        sb_layout.addWidget(ver)
+        root.addWidget(status_bar)
 
         self._active_workers: int = 0
 
@@ -172,6 +311,11 @@ class MainWindow(QMainWindow):
 
         self._check_startup_health()
         self.switch_view(0)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        if hasattr(self, '_glow'):
+            self._glow.setGeometry(0, 0, self.width(), self.height() // 2)
 
     def _check_startup_health(self) -> None:
         try:
@@ -183,7 +327,7 @@ class MainWindow(QMainWindow):
             count = row["n"] if row else 0
             if count > 0:
                 self._alert_banner.setText(
-                    f"\u26a0\ufe0f  {count} file(s) flagged as missing since last scan. "
+                    f"⚠  {count} file(s) flagged as missing since last scan. "
                     "Go to Health to review.  [Click to dismiss]"
                 )
                 self._alert_banner.setVisible(True)
