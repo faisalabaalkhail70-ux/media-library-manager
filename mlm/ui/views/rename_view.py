@@ -67,11 +67,26 @@ class RenamePreviewModel(QAbstractTableModel):
         if rows:
             self.set_rows(rows)
 
-    def set_rows(self, rows: list[dict]) -> None:
+    def set_rows(self, rows: list[dict], preserve_paths: set[str] | None = None) -> None:
+        """Load rows into the model.
+
+        Parameters
+        ----------
+        rows:           New preview rows from the rename service.
+        preserve_paths: Set of ``old_path`` values whose checked state should
+                        be preserved from a previous call.  When provided,
+                        any row whose old_path is in the set will be checked
+                        even if its status is not 'valid'.  Rows whose
+                        old_path is NOT in the set will be unchecked.
+                        When None, defaults to auto-checking all 'valid' rows.
+        """
         self.beginResetModel()
         self._rows = rows or []
-        # Auto-check rows that are 'valid'; leave others unchecked
-        self._checked = [r.get("status") == "valid" for r in self._rows]
+        if preserve_paths is not None:
+            self._checked = [r.get("old_path") in preserve_paths for r in self._rows]
+        else:
+            # Auto-check rows that are 'valid'; leave others unchecked
+            self._checked = [r.get("status") == "valid" for r in self._rows]
         self.endResetModel()
 
     def rows(self) -> list[dict]:
@@ -322,7 +337,7 @@ class RenameView(QWidget):
 
     def _apply_preset(self, template: str) -> None:
         self.template_input.setText(template)
-        self.preview()
+        self._preview_preserving_checks()
 
     def _update_status(self) -> None:
         rows = self.model.rows()
@@ -347,13 +362,40 @@ class RenameView(QWidget):
         self.model.set_rows(rows)
         self._update_status()
 
+    def _preview_preserving_checks(self) -> None:
+        """Re-run preview while keeping the user's current checkbox selections.
+
+        Called by preset buttons so that manually-unchecked rows are not
+        silently re-checked when the user switches to a different template.
+        """
+        template = self.template_input.text().strip()
+        if not template:
+            QMessageBox.warning(self, "Empty template", "Enter a rename template first.")
+            return
+        # Capture which old_paths are currently checked before re-building
+        previously_checked = {
+            r["old_path"]
+            for r, c in zip(self.model.rows(), self.model._checked)
+            if c
+        }
+        rows = self.rename_service.build_preview(template)
+        # If the user had made no manual selections yet (first preview), auto-check valid rows
+        if not previously_checked:
+            self.model.set_rows(rows)
+        else:
+            self.model.set_rows(rows, preserve_paths=previously_checked)
+        self._update_status()
+
+
     def clear_preview(self) -> None:
         self.model.set_rows([])
         self.status_label.setText("")
 
     def apply_changes(self) -> None:
-        rows = self.model.checked_rows()
-        rows = [r for r in rows if r["status"] == "valid"]
+        checked = self.model.checked_rows()
+        rows = [r for r in checked if r["status"] == "valid"]
+        skipped = len(checked) - len(rows)
+
         if not rows:
             QMessageBox.information(
                 self, "Nothing to apply",
@@ -361,9 +403,13 @@ class RenameView(QWidget):
                 "Use the selection buttons or check rows manually."
             )
             return
+
+        msg = f"Rename {len(rows)} selected file(s)?\nThis can be undone via the Undo button."
+        if skipped:
+            msg += f"\n\nNote: {skipped} checked row(s) with non-valid status will be skipped."
+
         reply = QMessageBox.question(
-            self, "Apply Rename",
-            f"Rename {len(rows)} selected file(s)?\nThis can be undone via the Undo button.",
+            self, "Apply Rename", msg,
             QMessageBox.Yes | QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
