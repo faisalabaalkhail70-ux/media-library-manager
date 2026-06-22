@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, QSortFilterProxyModel
 from mlm.db.connection import get_connection
 from mlm.ui.models.shows_model import ShowsTableModel
 from mlm.ui.column_visibility import ColumnVisibilityDialog, apply_saved_visibility
+from mlm.ui.filter_panel import FilterPanel
 from mlm.workers.episode_worker import EpisodeWorker
 
 
@@ -23,20 +24,21 @@ class ShowsView(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         title_lbl = QLabel("TV Shows")
         title_lbl.setObjectName("h1")
         layout.addWidget(title_lbl)
 
+        # ── Toolbar ───────────────────────────────────────────────────
         toolbar = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search by title...")
         self.search_input.setFixedWidth(300)
-        self.search_input.textChanged.connect(self._apply_filter)
+        self.search_input.textChanged.connect(self._apply_all)
 
         self.clear_search_btn = QPushButton("Clear")
-        self.clear_search_btn.clicked.connect(self._clear_search)
+        self.clear_search_btn.clicked.connect(self.search_input.clear)
 
         self.check_btn = QPushButton("Check Missing Episodes")
         self.check_btn.setObjectName("primary")
@@ -60,6 +62,12 @@ class ShowsView(QWidget):
         toolbar.addWidget(self.refresh_btn)
         layout.addLayout(toolbar)
 
+        # ── Filter panel ────────────────────────────────────────────
+        self._filters = FilterPanel(media_type="show")
+        self._filters.changed.connect(self._apply_all)
+        layout.addWidget(self._filters)
+
+        # ── Table ────────────────────────────────────────────────────
         self.table = QTableView()
         self.table.setModel(self._proxy)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -84,7 +92,7 @@ class ShowsView(QWidget):
             rows = conn.execute(
                 """
                 SELECT
-                    me.id                                                       AS entity_id,
+                    me.id AS entity_id,
                     me.title,
                     me.release_year,
                     me.rating,
@@ -119,19 +127,17 @@ class ShowsView(QWidget):
             result.append(d)
 
         self._all_rows = result
-        self._apply_filter()
+        self._filters.populate_genres(result)
+        self._apply_all()
 
-    def _apply_filter(self) -> None:
+    def _apply_all(self) -> None:
         q = self.search_input.text().strip().lower()
-        filtered = (
-            [r for r in self._all_rows if q in r.get("title", "").lower()]
-            if q else self._all_rows
-        )
-        self._source_model.set_rows(filtered)
-        self.status_label.setText(f"{len(filtered)} of {len(self._all_rows)} shows")
-
-    def _clear_search(self) -> None:
-        self.search_input.clear()
+        rows = self._all_rows
+        if q:
+            rows = [r for r in rows if q in r.get("title", "").lower()]
+        rows = self._filters.apply(rows)
+        self._source_model.set_rows(rows)
+        self.status_label.setText(f"{len(rows)} of {len(self._all_rows)} shows")
 
     def _check_missing(self) -> None:
         if self._worker and self._worker.isRunning():
@@ -163,7 +169,6 @@ class ShowsView(QWidget):
         dlg.exec()
 
     def _open_detail(self, index) -> None:
-        # Map proxy index back to source to get correct row data
         source_index = self._proxy.mapToSource(index)
         row = self._source_model.get_row(source_index.row())
         entity_id = row.get("entity_id")

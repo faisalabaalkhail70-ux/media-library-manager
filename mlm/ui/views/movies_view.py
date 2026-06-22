@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, QSortFilterProxyModel
 from mlm.db.connection import get_connection
 from mlm.ui.models.movies_model import MoviesTableModel
 from mlm.ui.column_visibility import ColumnVisibilityDialog, apply_saved_visibility
+from mlm.ui.filter_panel import FilterPanel
 
 
 class MoviesView(QWidget):
@@ -20,17 +21,18 @@ class MoviesView(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         title = QLabel("Movies")
         title.setObjectName("h1")
         layout.addWidget(title)
 
+        # ── Toolbar ───────────────────────────────────────────────────
         toolbar = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search by title...")
         self.search_input.setFixedWidth(300)
-        self.search_input.textChanged.connect(self._apply_filter)
+        self.search_input.textChanged.connect(self._apply_all)
 
         clear_btn = QPushButton("Clear")
         clear_btn.clicked.connect(self.search_input.clear)
@@ -52,6 +54,12 @@ class MoviesView(QWidget):
         toolbar.addWidget(refresh_btn)
         layout.addLayout(toolbar)
 
+        # ── Filter panel ────────────────────────────────────────────
+        self._filters = FilterPanel(media_type="movie")
+        self._filters.changed.connect(self._apply_all)
+        layout.addWidget(self._filters)
+
+        # ── Table ────────────────────────────────────────────────────
         self.table = QTableView()
         self.table.setModel(self._proxy)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -91,16 +99,17 @@ class MoviesView(QWidget):
             result.append(d)
 
         self._all_rows = result
-        self._apply_filter()
+        self._filters.populate_genres(result)
+        self._apply_all()
 
-    def _apply_filter(self) -> None:
+    def _apply_all(self) -> None:
         q = self.search_input.text().strip().lower()
-        filtered = (
-            [r for r in self._all_rows if q in r.get("title", "").lower()]
-            if q else self._all_rows
-        )
-        self._source_model.set_rows(filtered)
-        self.status_label.setText(f"{len(filtered)} of {len(self._all_rows)} movies")
+        rows = self._all_rows
+        if q:
+            rows = [r for r in rows if q in r.get("title", "").lower()]
+        rows = self._filters.apply(rows)
+        self._source_model.set_rows(rows)
+        self.status_label.setText(f"{len(rows)} of {len(self._all_rows)} movies")
 
     def _open_col_dialog(self) -> None:
         dlg = ColumnVisibilityDialog(self.table, "movies", parent=self)

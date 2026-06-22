@@ -1,15 +1,16 @@
-"""Main application window with sidebar navigation and a global activity bar."""
+"""Main application window — sidebar + stacked content + global search + activity bar."""
 import logging
 
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QMainWindow,
-    QProgressBar, QPushButton, QSizePolicy,
+    QProgressBar, QPushButton,
     QStackedWidget, QVBoxLayout, QWidget, QApplication
 )
 
 from mlm.db.repositories.settings_repo import SettingsRepository
 from mlm.ui.styles import get_stylesheet
+from mlm.ui.global_search import GlobalSearchBar
 from mlm.ui.views.dashboard_view   import DashboardView
 from mlm.ui.views.scanner_view     import ScannerView
 from mlm.ui.views.library_view     import LibraryView
@@ -42,7 +43,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Media Library Manager")
 
-        # Apply saved theme on startup
         settings = SettingsRepository()
         theme = settings.get("ui_theme", "dark")
         QApplication.instance().setStyleSheet(get_stylesheet(theme))
@@ -54,12 +54,17 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # ── Health alert banner (hidden by default) ──────────────────────
+        # ── Health alert banner ─────────────────────────────────────────
         self._alert_banner = QLabel("")
         self._alert_banner.setObjectName("alert_banner")
         self._alert_banner.setAlignment(Qt.AlignCenter)
         self._alert_banner.setVisible(False)
         outer.addWidget(self._alert_banner)
+
+        # ── Global search bar ─────────────────────────────────────────
+        # Built after stack so we can pass nav_buttons to it
+        self.stack = QStackedWidget()
+        self.nav_buttons: list[QPushButton] = []
 
         # ── Main area (sidebar + stack) ────────────────────────────────
         main_area = QWidget()
@@ -86,9 +91,6 @@ class MainWindow(QMainWindow):
         divider.setStyleSheet("color: #333; margin-bottom: 8px;")
         side_layout.addWidget(divider)
 
-        self.stack = QStackedWidget()
-        self.nav_buttons: list[QPushButton] = []
-
         for index, (label, ViewClass) in enumerate(NAV_ITEMS):
             view = ViewClass()
             self.stack.addWidget(view)
@@ -100,7 +102,6 @@ class MainWindow(QMainWindow):
             self.nav_buttons.append(btn)
 
         side_layout.addStretch()
-
         version_lbl = QLabel("v1.0.0")
         version_lbl.setObjectName("muted")
         version_lbl.setAlignment(Qt.AlignCenter)
@@ -110,7 +111,17 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(sidebar)
         main_layout.addWidget(self.stack, 1)
 
-        # ── Global activity bar (bottom) ──────────────────────────────
+        # Now build the search bar (needs stack + nav_buttons)
+        self._search_bar = GlobalSearchBar(self.stack, self.nav_buttons)
+        self._search_bar.setFixedHeight(44)
+        self._search_bar.setStyleSheet(
+            "background: #1a1a1a; border-bottom: 1px solid #2c2c2c;"
+        )
+
+        outer.addWidget(self._search_bar)
+        outer.addWidget(main_area, 1)
+
+        # ── Global activity bar ─────────────────────────────────────────
         activity_bar = QFrame()
         activity_bar.setObjectName("activity_bar")
         activity_bar.setFixedHeight(32)
@@ -140,25 +151,19 @@ class MainWindow(QMainWindow):
         bar_layout.addWidget(self._activity_label)
         bar_layout.addStretch()
         bar_layout.addWidget(self._progress_bar)
-
-        outer.addWidget(main_area, 1)
         outer.addWidget(activity_bar)
 
         self._active_workers: int = 0
 
-        # Apply saved row density
         density = settings.get("ui_row_density", "comfortable")
         self._row_height = 20 if density == "compact" else 28
 
-        # Show health alert if any files are flagged missing
         self._check_startup_health()
-
         self.switch_view(0)
 
     # ── Startup health check ─────────────────────────────────────────
 
     def _check_startup_health(self) -> None:
-        """Query DB for missing-flagged files and show a dismissible banner."""
         try:
             from mlm.db.connection import get_connection
             with get_connection() as conn:
@@ -168,27 +173,23 @@ class MainWindow(QMainWindow):
             count = row["n"] if row else 0
             if count > 0:
                 self._alert_banner.setText(
-                    f"\u26a0\ufe0f  {count} file(s) flagged as missing from your last scan. "
-                    "Go to Health to review.  "
-                    "[Click to dismiss]"
+                    f"\u26a0\ufe0f  {count} file(s) flagged as missing since last scan. "
+                    "Go to Health to review.  [Click to dismiss]"
                 )
                 self._alert_banner.setVisible(True)
                 self._alert_banner.mousePressEvent = lambda _: self._alert_banner.setVisible(False)
         except Exception as exc:
             log.warning("Startup health check failed: %s", exc)
 
-    # ── Public API for views ─────────────────────────────────────────
+    # ── Public API ──────────────────────────────────────────────
 
     def track_worker(self, worker: QThread, task_label: str = "Working…") -> None:
         self._active_workers += 1
         self._activity_label.setText(task_label)
         self._progress_bar.setRange(0, 0)
         self._progress_bar.setVisible(True)
-        log.debug("Activity bar: started '%s' (%d active)", task_label, self._active_workers)
-
         if hasattr(worker, "progress"):
             worker.progress.connect(self._on_worker_progress)
-
         for signal_name in ("finished", "finished_scan", "finished_build",
                             "finished_apply", "finished_undo", "finished_export",
                             "finished_check", "failed"):
@@ -198,7 +199,6 @@ class MainWindow(QMainWindow):
                 break
 
     def show_alert(self, message: str) -> None:
-        """Show the top alert banner with *message* (dismissible by click)."""
         self._alert_banner.setText(message + "  [Click to dismiss]")
         self._alert_banner.setVisible(True)
         self._alert_banner.mousePressEvent = lambda _: self._alert_banner.setVisible(False)
@@ -206,7 +206,7 @@ class MainWindow(QMainWindow):
     def set_status(self, message: str) -> None:
         self._activity_label.setText(message)
 
-    # ── Private slots ─────────────────────────────────────────────
+    # ── Private slots ───────────────────────────────────────────
 
     def _on_worker_progress(self, done: int, total: int) -> None:
         if total > 0:
@@ -215,7 +215,6 @@ class MainWindow(QMainWindow):
 
     def _on_worker_done(self, task_label: str) -> None:
         self._active_workers = max(0, self._active_workers - 1)
-        log.debug("Activity bar: finished '%s' (%d active)", task_label, self._active_workers)
         if self._active_workers == 0:
             self._progress_bar.setVisible(False)
             self._progress_bar.setRange(0, 100)
