@@ -3,9 +3,10 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
     QTableView, QLineEdit, QAbstractItemView
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSortFilterProxyModel
 from mlm.db.connection import get_connection
 from mlm.ui.models.shows_model import ShowsTableModel
+from mlm.ui.column_visibility import ColumnVisibilityDialog, apply_saved_visibility
 from mlm.workers.episode_worker import EpisodeWorker
 
 
@@ -13,7 +14,10 @@ class ShowsView(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self._all_rows: list[dict] = []
-        self.model = ShowsTableModel([])
+        self._source_model = ShowsTableModel([])
+        self._proxy = QSortFilterProxyModel()
+        self._proxy.setSourceModel(self._source_model)
+        self._proxy.setSortCaseSensitivity(Qt.CaseInsensitive)
         self._detail_view = None
         self._worker = None
 
@@ -26,7 +30,6 @@ class ShowsView(QWidget):
         layout.addWidget(title_lbl)
 
         toolbar = QHBoxLayout()
-
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search by title...")
         self.search_input.setFixedWidth(300)
@@ -39,6 +42,9 @@ class ShowsView(QWidget):
         self.check_btn.setObjectName("primary")
         self.check_btn.clicked.connect(self._check_missing)
 
+        col_btn = QPushButton("\u2699 Columns")
+        col_btn.clicked.connect(self._open_col_dialog)
+
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.load_rows)
 
@@ -50,17 +56,19 @@ class ShowsView(QWidget):
         toolbar.addStretch()
         toolbar.addWidget(self.status_label)
         toolbar.addWidget(self.check_btn)
+        toolbar.addWidget(col_btn)
         toolbar.addWidget(self.refresh_btn)
         layout.addLayout(toolbar)
 
         self.table = QTableView()
-        self.table.setModel(self.model)
+        self.table.setModel(self._proxy)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.setSortingEnabled(False)
+        self.table.setSortingEnabled(True)
+        self.table.horizontalHeader().setSortIndicatorShown(True)
         self.table.doubleClicked.connect(self._open_detail)
         layout.addWidget(self.table)
 
@@ -69,6 +77,7 @@ class ShowsView(QWidget):
         layout.addWidget(hint)
 
         self.load_rows()
+        apply_saved_visibility(self.table, "shows")
 
     def load_rows(self) -> None:
         with get_connection() as conn:
@@ -80,13 +89,8 @@ class ShowsView(QWidget):
                     me.release_year,
                     me.rating,
                     me.genres_json,
-
-                    -- Seasons that have at least one episode on disk
                     COUNT(DISTINCT CASE WHEN ep.is_missing = 0
                           THEN ep.season_number END)                            AS seasons_have,
-
-                    -- Seasons that have at least one missing episode
-                    -- but zero present ones (fully absent season)
                     COUNT(DISTINCT CASE
                         WHEN ep.is_missing = 1
                          AND ep.season_number NOT IN (
@@ -94,10 +98,8 @@ class ShowsView(QWidget):
                              WHERE e2.entity_id = me.id AND e2.is_missing = 0
                          )
                         THEN ep.season_number END)                             AS seasons_missing,
-
                     SUM(CASE WHEN ep.is_missing = 0 THEN 1 ELSE 0 END)        AS episodes_have,
                     SUM(CASE WHEN ep.is_missing = 1 THEN 1 ELSE 0 END)        AS episodes_missing
-
                 FROM media_entities me
                 LEFT JOIN episodes ep ON ep.entity_id = me.id
                 WHERE me.media_type = 'show'
@@ -125,7 +127,7 @@ class ShowsView(QWidget):
             [r for r in self._all_rows if q in r.get("title", "").lower()]
             if q else self._all_rows
         )
-        self.model.set_rows(filtered)
+        self._source_model.set_rows(filtered)
         self.status_label.setText(f"{len(filtered)} of {len(self._all_rows)} shows")
 
     def _clear_search(self) -> None:
@@ -136,15 +138,12 @@ class ShowsView(QWidget):
             return
         self.check_btn.setEnabled(False)
         self.status_label.setText("Checking missing episodes via TMDB...")
-
         self._worker = EpisodeWorker()
         self._worker.finished_check.connect(self._on_check_done)
         self._worker.failed.connect(self._on_check_failed)
-
         main_win = self.window()
         if hasattr(main_win, "track_worker"):
             main_win.track_worker(self._worker, "Checking missing episodes…")
-
         self._worker.start()
 
     def _on_check_done(self, results: list) -> None:
@@ -159,13 +158,18 @@ class ShowsView(QWidget):
         self.check_btn.setEnabled(True)
         self.status_label.setText(f"Check failed: {message}")
 
+    def _open_col_dialog(self) -> None:
+        dlg = ColumnVisibilityDialog(self.table, "shows", parent=self)
+        dlg.exec()
+
     def _open_detail(self, index) -> None:
-        row = self.model.get_row(index.row())
+        # Map proxy index back to source to get correct row data
+        source_index = self._proxy.mapToSource(index)
+        row = self._source_model.get_row(source_index.row())
         entity_id = row.get("entity_id")
         show_title = row.get("title", "Show")
         if not entity_id:
             return
-
         from mlm.ui.views.show_detail_view import ShowDetailView
         self._detail_view = ShowDetailView(entity_id=entity_id, show_title=show_title)
         self._detail_view.setWindowTitle(f"Episodes — {show_title}")

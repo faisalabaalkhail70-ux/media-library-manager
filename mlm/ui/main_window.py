@@ -5,9 +5,11 @@ from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QMainWindow,
     QProgressBar, QPushButton, QSizePolicy,
-    QStackedWidget, QVBoxLayout, QWidget,
+    QStackedWidget, QVBoxLayout, QWidget, QApplication
 )
 
+from mlm.db.repositories.settings_repo import SettingsRepository
+from mlm.ui.styles import get_stylesheet
 from mlm.ui.views.dashboard_view   import DashboardView
 from mlm.ui.views.scanner_view     import ScannerView
 from mlm.ui.views.library_view     import LibraryView
@@ -36,16 +38,14 @@ NAV_ITEMS = [
 
 
 class MainWindow(QMainWindow):
-    """Top-level window: sidebar + stacked content area + global activity bar.
-
-    The activity bar at the bottom shows a progress bar and status label
-    whenever any background worker is active.  Views register their workers
-    by calling ``MainWindow.track_worker(worker, label)``.
-    """
-
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Media Library Manager")
+
+        # Apply saved theme on startup
+        settings = SettingsRepository()
+        theme = settings.get("ui_theme", "dark")
+        QApplication.instance().setStyleSheet(get_stylesheet(theme))
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -54,13 +54,20 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # ── Main area (sidebar + stack) ───────────────────────────
+        # ── Health alert banner (hidden by default) ──────────────────────
+        self._alert_banner = QLabel("")
+        self._alert_banner.setObjectName("alert_banner")
+        self._alert_banner.setAlignment(Qt.AlignCenter)
+        self._alert_banner.setVisible(False)
+        outer.addWidget(self._alert_banner)
+
+        # ── Main area (sidebar + stack) ────────────────────────────────
         main_area = QWidget()
         main_layout = QHBoxLayout(main_area)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # ── Sidebar ───────────────────────────────────────────────
+        # ── Sidebar ────────────────────────────────────────────────────
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(220)
@@ -103,7 +110,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(sidebar)
         main_layout.addWidget(self.stack, 1)
 
-        # ── Global activity bar (bottom) ──────────────────────────
+        # ── Global activity bar (bottom) ──────────────────────────────
         activity_bar = QFrame()
         activity_bar.setObjectName("activity_bar")
         activity_bar.setFixedHeight(32)
@@ -138,45 +145,65 @@ class MainWindow(QMainWindow):
         outer.addWidget(activity_bar)
 
         self._active_workers: int = 0
+
+        # Apply saved row density
+        density = settings.get("ui_row_density", "comfortable")
+        self._row_height = 20 if density == "compact" else 28
+
+        # Show health alert if any files are flagged missing
+        self._check_startup_health()
+
         self.switch_view(0)
 
-    # ── Public API for views ──────────────────────────────────────
+    # ── Startup health check ─────────────────────────────────────────
+
+    def _check_startup_health(self) -> None:
+        """Query DB for missing-flagged files and show a dismissible banner."""
+        try:
+            from mlm.db.connection import get_connection
+            with get_connection() as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS n FROM media_files WHERE is_missing = 1"
+                ).fetchone()
+            count = row["n"] if row else 0
+            if count > 0:
+                self._alert_banner.setText(
+                    f"\u26a0\ufe0f  {count} file(s) flagged as missing from your last scan. "
+                    "Go to Health to review.  "
+                    "[Click to dismiss]"
+                )
+                self._alert_banner.setVisible(True)
+                self._alert_banner.mousePressEvent = lambda _: self._alert_banner.setVisible(False)
+        except Exception as exc:
+            log.warning("Startup health check failed: %s", exc)
+
+    # ── Public API for views ─────────────────────────────────────────
 
     def track_worker(self, worker: QThread, task_label: str = "Working…") -> None:
-        """Connect *worker* signals to the global activity bar.
-
-        Call this from any view immediately after creating a QThread worker::
-
-            self.worker = ScanWorker(...)
-            self.window().track_worker(self.worker, "Scanning…")
-            self.worker.start()
-
-        The progress bar shows indefinite animation while the worker runs
-        and disappears automatically when it finishes or fails.
-        If the worker emits ``progress(int done, int total)`` the bar switches
-        to determinate mode.
-        """
         self._active_workers += 1
         self._activity_label.setText(task_label)
-        self._progress_bar.setRange(0, 0)   # indeterminate (spinner-style)
+        self._progress_bar.setRange(0, 0)
         self._progress_bar.setVisible(True)
         log.debug("Activity bar: started '%s' (%d active)", task_label, self._active_workers)
 
-        # Wire determinate progress if the worker supports it
         if hasattr(worker, "progress"):
             worker.progress.connect(self._on_worker_progress)
 
-        # Wire finish / failure to hide the bar
         for signal_name in ("finished", "finished_scan", "finished_build",
                             "finished_apply", "finished_undo", "finished_export",
-                            "failed"):
+                            "finished_check", "failed"):
             sig = getattr(worker, signal_name, None)
             if sig is not None:
                 sig.connect(lambda *_: self._on_worker_done(task_label))
-                break  # only connect the first matching signal
+                break
+
+    def show_alert(self, message: str) -> None:
+        """Show the top alert banner with *message* (dismissible by click)."""
+        self._alert_banner.setText(message + "  [Click to dismiss]")
+        self._alert_banner.setVisible(True)
+        self._alert_banner.mousePressEvent = lambda _: self._alert_banner.setVisible(False)
 
     def set_status(self, message: str) -> None:
-        """Update the activity bar label from any view."""
         self._activity_label.setText(message)
 
     # ── Private slots ─────────────────────────────────────────────
@@ -195,7 +222,7 @@ class MainWindow(QMainWindow):
             self._progress_bar.setValue(0)
             self._activity_label.setText("Ready")
 
-    # ── Navigation ────────────────────────────────────────────────
+    # ── Navigation ──────────────────────────────────────────────
 
     def switch_view(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
