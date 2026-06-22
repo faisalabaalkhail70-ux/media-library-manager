@@ -2,32 +2,64 @@
 
 Three group types
   exact    — identical bytes (size + partial_hash + full_hash)
-  quality  — same TMDB entity + different file path / resolution
-  possible — fuzzy name/duration/size similarity
+  quality  — same TMDB entity + same episode code + different file path / resolution
+  possible — same episode code OR same name, clearly different quality/folder
 
-Key guards against false positives
-  1. Episode-code guard  : never group S01E01 with S01E04
-  2. Same-folder guard   : files in the same folder are almost certainly
-                           different episodes, skip them
-  3. Normalised scoring  : strip codec/quality tags before name comparison
-  4. Graduated duration  : 60-second tolerance with linear decay
+Scoring for 'possible'
+  - name_score  (0.70 weight): normalised title only (strip codec/quality/group tags)
+  - quality_tag (0.30 weight): bonus when quality tags differ (different encode of same ep)
+  Duration is deliberately NOT used as a scoring factor — TV episodes of the same
+  show routinely share runtime within seconds of each other.
+
+Key guards
+  1. Episode-code guard  : only pair files that share the same SxxExx code
+  2. Same-folder guard   : files in the same folder are almost certainly different episodes
+  3. Size guard          : >500 MB difference → very unlikely to be same content
 """
 import logging
+import re
 from collections import defaultdict
 
 from mlm.db.connection import get_connection
 from mlm.db.repositories.duplicates_repo import DuplicatesRepository
 from mlm.db.repositories.files_repo import FilesRepository
 from mlm.utils.hashing import partial_md5, full_md5
-from mlm.utils.similarity import (
-    text_similarity, duration_similarity, size_similarity, same_episode
-)
+from mlm.utils.similarity import text_similarity, same_episode
 
 log = logging.getLogger(__name__)
 
-_MAX_SIZE_DIFF_BYTES       = 200 * 1024 * 1024   # 200 MB
-_MAX_DURATION_DIFF_SECONDS = 120                 # hard outer limit
-_MIN_SCORE                 = 0.80                # lowered slightly; episode guard does the heavy lifting
+_MAX_SIZE_DIFF_BYTES = 500 * 1024 * 1024   # 500 MB
+_MIN_NAME_SCORE      = 0.70                 # minimum normalised title similarity
+
+# Tags stripped before name comparison
+_STRIP_RE = re.compile(
+    r"\b("
+    r"bluray|blu-ray|bdrip|brrip|webrip|web-dl|web|hdtv|dvdrip|dvd|"
+    r"1080p|720p|480p|2160p|4k|uhd|"
+    r"x264|x265|h264|h265|hevc|avc|xvid|divx|"
+    r"aac|ac3|dts|ddp|atmos|truehd|flac|mp3|"
+    r"remux|repack|proper|extended|theatrical|"
+    r"yts|rarbg|ettv|ion10|glhf|smurf|kontrast|ntg|bia|cm"
+    r")\b",
+    re.IGNORECASE,
+)
+_QUALITY_TAGS = re.compile(
+    r"\b(1080p|720p|480p|2160p|4k|uhd|bluray|blu-ray|webrip|web-dl|hdtv|bdrip)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalise(name: str) -> str:
+    """Strip codec/quality/group tokens so only title+episode code remain."""
+    name = name.rsplit(".", 1)[0]           # drop extension
+    name = name.replace(".", " ").replace("_", " ")
+    name = _STRIP_RE.sub("", name)
+    name = re.sub(r"\s{2,}", " ", name).strip().lower()
+    return name
+
+
+def _quality_tags_set(name: str) -> set[str]:
+    return {m.group(0).lower() for m in _QUALITY_TAGS.finditer(name)}
 
 
 class DuplicateService:
@@ -55,7 +87,7 @@ class DuplicateService:
 
     def build_duplicate_groups(self) -> dict:
         files = self._list_candidate_files()
-        self.repo.clear_non_ignored_groups()   # preserve "ignored" groups
+        self.repo.clear_non_ignored_groups()
         log.info("Building duplicate groups from %d candidate files", len(files))
 
         exact_groups   = self._build_exact_duplicates(files)
@@ -81,7 +113,7 @@ class DuplicateService:
             ).fetchall()
         return {r[0] for r in rows}
 
-    # ── Exact duplicates ─────────────────────────────────────────────────
+    # ── Exact duplicates ───────────────────────────────────────────────────
 
     def _build_exact_duplicates(self, files: list[dict]) -> int:
         by_size: dict[int, list[dict]] = defaultdict(list)
@@ -119,7 +151,8 @@ class DuplicateService:
 
         return group_count
 
-    # ── Quality variants ─────────────────────────────────────────────────
+    # ── Quality variants ────────────────────────────────────────────────
+    # Same entity + same episode code + different file path (different encode/source)
 
     def _build_quality_variants(self, files: list[dict]) -> int:
         entity_buckets: dict[int, list[dict]] = defaultdict(list)
@@ -158,83 +191,101 @@ class DuplicateService:
                     continue
                 if len({f["file_path"] for f in sub_members}) < 2:
                     continue
+                # Only flag as quality-variant if resolution/codec actually differs
+                resolutions = {f.get("resolution") for f in sub_members if f.get("resolution")}
+                codecs      = {f.get("video_codec") for f in sub_members if f.get("video_codec")}
+                if len(resolutions) < 2 and len(codecs) < 2:
+                    continue
                 gid = self.repo.create_group("quality", 1.0)
                 for item in sub_members:
                     self.repo.add_item(gid, item["id"], 1.0, {
-                        "reason": "same_entity_diff_file",
+                        "reason": "same_entity_diff_quality",
                         "resolution": item.get("resolution"),
+                        "codec": item.get("video_codec"),
                     })
                 group_count += 1
 
         return group_count
 
-    # ── Possible duplicates (fuzzy) ─────────────────────────────────────
+    # ── Possible duplicates (name + quality tag based) ─────────────────────
+    # Pairs files with the SAME episode code that differ in quality/folder.
+    # Duration is NOT used — TV episodes share runtimes too easily.
 
     def _build_possible_duplicates(self, files: list[dict]) -> int:
-        group_count = 0
-        used_pairs: set[tuple[int, int]] = set()
+        group_count  = 0
+        used_pairs:  set[tuple[int, int]] = set()
+        ignored_ids  = self._ignored_file_ids()
 
-        # Build ignored group IDs so we skip them
-        ignored_ids = self._ignored_file_ids()
+        # Index files by their SxxExx code so we only compare same-episode pairs
+        ep_code_re = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,2})")
+        ep_buckets: dict[str, list[dict]] = defaultdict(list)
+        no_code: list[dict] = []
 
-        size_buckets: dict[int, list[dict]] = defaultdict(list)
         for f in files:
             if f["id"] in ignored_ids:
                 continue
-            bucket = f["file_size_bytes"] // (_MAX_SIZE_DIFF_BYTES // 2)
-            size_buckets[bucket].append(f)
-            size_buckets[bucket + 1].append(f)
+            m = ep_code_re.search(f["file_name"])
+            if m:
+                ep_buckets[m.group(0).upper()].append(f)
+            else:
+                no_code.append(f)
 
-        seen_in_bucket: set[tuple[int, int]] = set()
-        for bucket_files in size_buckets.values():
+        def _check_pair(a: dict, b: dict) -> None:
+            nonlocal group_count
+            pair_key = (min(a["id"], b["id"]), max(a["id"], b["id"]))
+            if pair_key in used_pairs:
+                return
+
+            # Guard: same parent folder → different episodes of the same show
+            if (a.get("parent_folder") and b.get("parent_folder") and
+                    a["parent_folder"] == b["parent_folder"]):
+                return
+
+            # Guard: size too different
+            if abs(a["file_size_bytes"] - b["file_size_bytes"]) > _MAX_SIZE_DIFF_BYTES:
+                return
+
+            # Name similarity on normalised title
+            norm_a = _normalise(a["file_name"])
+            norm_b = _normalise(b["file_name"])
+            name_score = text_similarity(norm_a, norm_b)
+            if name_score < _MIN_NAME_SCORE:
+                return
+
+            # Quality-tag bonus: different quality tags → likely different encodes
+            tags_a = _quality_tags_set(a["file_name"])
+            tags_b = _quality_tags_set(b["file_name"])
+            quality_diff = 1.0 if tags_a != tags_b else 0.0
+
+            score = round((name_score * 0.70) + (quality_diff * 0.30), 3)
+            if score < _MIN_NAME_SCORE:
+                return
+
+            used_pairs.add(pair_key)
+            gid = self.repo.create_group("possible", score)
+            for item in (a, b):
+                self.repo.add_item(gid, item["id"], score, {
+                    "name_score":   name_score,
+                    "quality_diff": quality_diff,
+                    "tags_a":       list(tags_a),
+                    "tags_b":       list(tags_b),
+                })
+            group_count += 1
+
+        # Compare within same episode code buckets
+        for bucket_files in ep_buckets.values():
             for i, a in enumerate(bucket_files):
                 for b in bucket_files[i + 1:]:
-                    pair_key = (min(a["id"], b["id"]), max(a["id"], b["id"]))
-                    if pair_key in seen_in_bucket or pair_key in used_pairs:
-                        continue
-                    seen_in_bucket.add(pair_key)
+                    _check_pair(a, b)
 
-                    # ── Guard 1: different episode codes → never duplicates
-                    ep_check = same_episode(a["file_name"], b["file_name"])
-                    if ep_check is False:   # both have codes and they differ
-                        continue
-
-                    # ── Guard 2: same parent folder → almost certainly different episodes
-                    if (a.get("parent_folder") and b.get("parent_folder") and
-                            a["parent_folder"] == b["parent_folder"]):
-                        continue
-
-                    # ── Guard 3: size too different
-                    if abs(a["file_size_bytes"] - b["file_size_bytes"]) > _MAX_SIZE_DIFF_BYTES:
-                        continue
-
-                    # ── Guard 4: duration too different
-                    if (a["duration_seconds"] and b["duration_seconds"] and
-                            abs(a["duration_seconds"] - b["duration_seconds"]) > _MAX_DURATION_DIFF_SECONDS):
-                        continue
-
-                    name_score = text_similarity(a["file_name"], b["file_name"])
-                    dur_score  = duration_similarity(a["duration_seconds"], b["duration_seconds"])
-                    sz_score   = size_similarity(a["file_size_bytes"], b["file_size_bytes"])
-                    score = round((name_score * 0.5) + (dur_score * 0.3) + (sz_score * 0.2), 3)
-
-                    if score < _MIN_SCORE:
-                        continue
-
-                    used_pairs.add(pair_key)
-                    gid = self.repo.create_group("possible", score)
-                    for item in (a, b):
-                        self.repo.add_item(gid, item["id"], score, {
-                            "name_score":     name_score,
-                            "duration_score": dur_score,
-                            "size_score":     sz_score,
-                        })
-                    group_count += 1
+        # For files without an episode code (movies), compare all pairs
+        for i, a in enumerate(no_code):
+            for b in no_code[i + 1:]:
+                _check_pair(a, b)
 
         return group_count
 
     def _ignored_file_ids(self) -> set[int]:
-        """Return file IDs that belong to a group marked review_status='ignored'."""
         with get_connection() as conn:
             rows = conn.execute(
                 """
@@ -245,8 +296,6 @@ class DuplicateService:
                 """
             ).fetchall()
         return {r[0] for r in rows}
-
-    # ── Hash helpers ─────────────────────────────────────────────────────
 
     def _compute_partial(self, item: dict) -> str:
         if item["partial_hash"]:

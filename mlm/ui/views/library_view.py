@@ -1,10 +1,12 @@
 """Library view — browse indexed files + run metadata/probe/health/bulk-rematch actions."""
+import os
 from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QMessageBox,
     QPushButton, QProgressBar, QTableView, QVBoxLayout, QWidget,
-    QAbstractItemView
+    QAbstractItemView, QMenu, QApplication
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSortFilterProxyModel
+from PySide6.QtGui import QAction
 
 from mlm.db.repositories.files_repo import FilesRepository
 from mlm.ui.models.media_files_model import MediaFilesTableModel
@@ -18,13 +20,15 @@ class LibraryView(QWidget):
         super().__init__()
         self.repo = FilesRepository()
         self.model = MediaFilesTableModel([])
+        self.proxy = QSortFilterProxyModel()
+        self.proxy.setSourceModel(self.model)
         self.metadata_worker = None
         self.probe_worker = None
         self.health_worker = None
-        self._probe_errors: list[tuple[str, str]] = []   # (path, reason)
+        self._probe_errors: list[tuple[str, str]] = []
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(14)
 
         # ── Header ───────────────────────────────────────────────
@@ -109,13 +113,28 @@ class LibraryView(QWidget):
         table_layout = QVBoxLayout(table_panel)
         table_layout.setContentsMargins(12, 12, 12, 12)
         self.table = QTableView()
-        self.table.setModel(self.model)
-        self.table.setSortingEnabled(False)
+        self.table.setModel(self.proxy)
+        self.table.setSortingEnabled(True)
+        self.table.horizontalHeader().setSortIndicatorShown(True)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.horizontalHeader().setStretchLastSection(True)
+        # Set reasonable default column widths
+        self.table.horizontalHeader().setDefaultSectionSize(130)
+        self.table.setColumnWidth(0, 50)   # ID
+        self.table.setColumnWidth(1, 260)  # Filename
+        self.table.setColumnWidth(2, 200)  # Matched Title
+        self.table.setColumnWidth(3, 55)   # Year
+        self.table.setColumnWidth(4, 90)   # Resolution
+        self.table.setColumnWidth(5, 70)   # Codec
+        self.table.setColumnWidth(6, 80)   # Size
+        self.table.setColumnWidth(7, 80)   # Duration
+        self.table.setColumnWidth(8, 120)  # Modified
+        # col 9 (Path) stretches to fill remaining space
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
         table_layout.addWidget(self.table)
         root.addWidget(table_panel, 1)
 
@@ -128,6 +147,113 @@ class LibraryView(QWidget):
         self.model.set_rows(rows)
         self.count_label.setText(f"{len(rows)} rows loaded")
 
+    def _selected_row(self) -> dict | None:
+        sel = self.table.selectionModel().selectedRows()
+        if not sel:
+            return None
+        source_idx = self.proxy.mapToSource(sel[0])
+        return self.model.get_row(source_idx.row())
+
+    # ── Context menu ────────────────────────────────────────────
+
+    def _show_context_menu(self, pos) -> None:
+        row = self._selected_row()
+        menu = QMenu(self)
+
+        # ─ Copy actions ───────────────────────────────────────────
+        copy_menu = menu.addMenu("Copy")
+        if row:
+            a = copy_menu.addAction("Copy Filename")
+            a.triggered.connect(lambda: QApplication.clipboard().setText(row.get("file_name", "")))
+            a = copy_menu.addAction("Copy Full Path")
+            a.triggered.connect(lambda: QApplication.clipboard().setText(row.get("file_path", "")))
+            a = copy_menu.addAction("Copy Folder Path")
+            folder = os.path.dirname(row.get("file_path", ""))
+            a.triggered.connect(lambda: QApplication.clipboard().setText(folder))
+            a = copy_menu.addAction("Copy Matched Title")
+            a.triggered.connect(lambda: QApplication.clipboard().setText(row.get("matched_title", "") or ""))
+            a = copy_menu.addAction("Copy Size")
+            a.triggered.connect(lambda: QApplication.clipboard().setText(
+                str(row.get("file_size_bytes", ""))
+            ))
+        else:
+            copy_menu.addAction("(no row selected)").setEnabled(False)
+
+        menu.addSeparator()
+
+        # ─ File actions (all require confirmation) ────────────────────
+        if row:
+            a = menu.addAction("Open Containing Folder")
+            a.triggered.connect(lambda: self._open_folder(row))
+
+            menu.addSeparator()
+
+            a = menu.addAction("\U0001f5d1 Delete File from Disk…")
+            a.triggered.connect(lambda: self._delete_file(row))
+
+            a = menu.addAction("\u274c Remove from Library (keep file)…")
+            a.triggered.connect(lambda: self._remove_from_library(row))
+
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _open_folder(self, row: dict) -> None:
+        folder = os.path.dirname(row.get("file_path", ""))
+        if folder and os.path.isdir(folder):
+            import subprocess
+            subprocess.Popen(f'explorer "{folder}"')
+        else:
+            QMessageBox.warning(self, "Not found", "Folder does not exist or is inaccessible.")
+
+    def _delete_file(self, row: dict) -> None:
+        """Delete the physical file from disk — requires explicit confirmation."""
+        path = row.get("file_path", "")
+        reply = QMessageBox.warning(
+            self,
+            "Delete File from Disk",
+            f"This will PERMANENTLY DELETE the file from your disk:\n\n{path}\n\n"
+            "This cannot be undone. Are you absolutely sure?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            os.remove(path)
+        except OSError as exc:
+            QMessageBox.critical(self, "Delete failed", str(exc))
+            return
+        # Mark as removed in DB
+        from mlm.db.connection import get_connection
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE media_files SET removed_at = CURRENT_TIMESTAMP WHERE file_path = ?",
+                (path,),
+            )
+        self.load_rows()
+        self.status_label.setText(f"Deleted: {os.path.basename(path)}")
+
+    def _remove_from_library(self, row: dict) -> None:
+        """Remove the DB record only — file on disk is untouched."""
+        path = row.get("file_path", "")
+        reply = QMessageBox.question(
+            self,
+            "Remove from Library",
+            f"Remove this file record from the library?\n\n{path}\n\n"
+            "The file on disk will NOT be deleted.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        from mlm.db.connection import get_connection
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE media_files SET removed_at = CURRENT_TIMESTAMP WHERE file_path = ?",
+                (path,),
+            )
+        self.load_rows()
+        self.status_label.setText(f"Removed: {os.path.basename(path)}")
+
     # ── Actions ───────────────────────────────────────────────
 
     def run_metadata_match(self) -> None:
@@ -135,13 +261,13 @@ class LibraryView(QWidget):
             self.metadata_worker.stop()
             self.status_label.setText("Stopping metadata match...")
             return
-        # limit=0 → process ALL unmatched files in one run
         self.metadata_worker = MetadataWorker(limit=0)
         self.metadata_worker.progress.connect(self.on_metadata_progress)
         self.metadata_worker.finished_batch.connect(self.on_metadata_finished)
         self.metadata_worker.failed.connect(self.on_worker_failed)
         self.progress.show()
         self.progress.setValue(0)
+        self.match_btn.setText("Stop Matching")
         self.status_label.setText("Matching metadata...")
         self.metadata_worker.start()
 
@@ -151,7 +277,6 @@ class LibraryView(QWidget):
             self.status_label.setText("Stopping ffprobe enrich...")
             return
         self._probe_errors = []
-        # limit=0 → process ALL files needing probe in one run
         self.probe_worker = ProbeWorker(limit=0)
         self.probe_worker.progress.connect(self.on_probe_progress)
         self.probe_worker.file_error.connect(self.on_probe_file_error)
@@ -217,13 +342,12 @@ class LibraryView(QWidget):
         self.status_label.setText(f"ffprobe {current}/{total}: {label}")
 
     def on_probe_file_error(self, file_path: str, error_msg: str) -> None:
-        """Called from the worker thread for each file that ffprobe can't process."""
-        # Collect silently during the run; show a summary at the end
         self._probe_errors.append((file_path, error_msg))
 
     def on_metadata_finished(self) -> None:
         self.progress.hide()
         self.rematch_btn.setEnabled(True)
+        self.match_btn.setText("Auto Match Metadata")
         self.status_label.setText("Metadata matching complete.")
         self.load_rows()
 
@@ -234,21 +358,19 @@ class LibraryView(QWidget):
             self.status_label.setText("ffprobe enrich complete — all files processed successfully.")
         else:
             self.status_label.setText(
-                f"ffprobe enrich complete — {error_count} file(s) could not be probed (marked as error)."
+                f"ffprobe enrich complete — {error_count} file(s) could not be probed."
             )
-            # Build a readable summary (cap at 10 lines to avoid giant dialogs)
             lines = []
             for path, reason in self._probe_errors[:10]:
                 short = path.split("\\")[-1] if "\\" in path else path.split("/")[-1]
                 lines.append(f"• {short}\n  {reason}")
             if error_count > 10:
-                lines.append(f"\u2026 and {error_count - 10} more (see log for full list).")
+                lines.append(f"… and {error_count - 10} more (see log).")
             QMessageBox.warning(
                 self,
                 f"{error_count} file(s) skipped during ffprobe",
-                "The following files could not be probed and were marked as errors.\n"
-                "They will be skipped on future runs.\n\n"
-                + "\n\n".join(lines),
+                "Files below could not be probed and were marked as errors.\n"
+                "They will be skipped on future runs.\n\n" + "\n\n".join(lines),
             )
         self._probe_errors = []
         self.load_rows()
@@ -269,6 +391,7 @@ class LibraryView(QWidget):
         self.progress.hide()
         self.progress.setRange(0, 100)
         self.health_btn.setText("Run Health Scan")
+        self.match_btn.setText("Auto Match Metadata")
         self.rematch_btn.setEnabled(True)
         self.status_label.setText("Operation failed.")
         QMessageBox.critical(self, "Operation failed", message)

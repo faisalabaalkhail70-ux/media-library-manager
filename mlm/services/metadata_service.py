@@ -21,19 +21,29 @@ class MetadataService:
         self.tmdb = tmdb or TMDBClient()
         self.entities_repo = entities_repo or EntitiesRepository()
 
-    def list_unmatched_files(self, limit: int = 500) -> list[dict]:
-        """Return up to *limit* files with no entity link."""
+    def list_unmatched_files(self, limit: int = 0) -> list[dict]:
+        """Return files with no entity link. limit=0 means all."""
         with get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, file_name, file_path
-                FROM media_files
-                WHERE entity_id IS NULL AND removed_at IS NULL
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            if limit and limit > 0:
+                rows = conn.execute(
+                    """
+                    SELECT id, file_name, file_path
+                    FROM media_files
+                    WHERE entity_id IS NULL AND removed_at IS NULL
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, file_name, file_path
+                    FROM media_files
+                    WHERE entity_id IS NULL AND removed_at IS NULL
+                    ORDER BY id DESC
+                    """
+                ).fetchall()
         return [dict(r) for r in rows]
 
     def auto_match_file(self, media_file_id: int, file_name: str) -> dict:
@@ -49,10 +59,6 @@ class MetadataService:
 
         log.info("Skipped file_id=%d — unrecognised filename format", media_file_id)
         return {"status": "skipped", "reason": "Unknown filename format"}
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _match_movie(self, media_file_id: int, parsed, file_name: str) -> dict:
         results = self.tmdb.search_movie(parsed.title or "", parsed.year)
@@ -129,16 +135,6 @@ class MetadataService:
     def manual_match_by_tmdb_id(
         self, media_file_id: int, tmdb_id: int, media_type: str
     ) -> dict:
-        """Directly link *media_file_id* to a known TMDB id.
-
-        Args:
-            media_file_id: DB id of the media_files row.
-            tmdb_id:       TMDB numeric identifier (must be > 0).
-            media_type:    ``"movie"`` or ``"show"``.
-
-        Raises:
-            ValueError: if *tmdb_id* is invalid or *media_type* is unknown.
-        """
         if tmdb_id <= 0:
             raise ValueError(f"tmdb_id must be a positive integer, got {tmdb_id}")
         if media_type not in {"movie", "show"}:

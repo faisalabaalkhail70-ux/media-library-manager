@@ -27,19 +27,23 @@ from mlm.ui.views.settings_view     import SettingsView
 log = logging.getLogger(__name__)
 
 NAV_ITEMS = [
-    ("\U0001f3e0  Dashboard",    DashboardView),     # 0
-    ("\U0001f4c2  Scanner",      ScannerView),       # 1
-    ("\U0001f4da  Library",      LibraryView),       # 2
-    ("\U0001f3ac  Movies",       MoviesView),        # 3
-    ("\U0001f4fa  TV Shows",     ShowsView),         # 4
-    ("\U0001f4da  Collections",  CollectionsView),   # 5
-    ("\U0001f4cb  Watchlist",    WatchlistView),     # 6  ← NEW
-    ("\U0001f50d  Duplicates",   DuplicatesView),    # 7
-    ("\u270f\ufe0f  Rename",       RenameView),        # 8
-    ("\U0001fa7a  Health",       HealthView),        # 9
-    ("\U0001f4ca  Reports",      ReportsView),       # 10
-    ("\u2699\ufe0f  Settings",     SettingsView),      # 11
+    ("\U0001f3e0  Dashboard",    DashboardView),
+    ("\U0001f4c2  Scanner",      ScannerView),
+    ("\U0001f4da  Library",      LibraryView),
+    ("\U0001f3ac  Movies",       MoviesView),
+    ("\U0001f4fa  TV Shows",     ShowsView),
+    ("\U0001f4da  Collections",  CollectionsView),
+    ("\U0001f4cb  Watchlist",    WatchlistView),
+    ("\U0001f50d  Duplicates",   DuplicatesView),
+    ("\u270f\ufe0f  Rename",       RenameView),
+    ("\U0001fa7a  Health",       HealthView),
+    ("\U0001f4ca  Reports",      ReportsView),
+    ("\u2699\ufe0f  Settings",     SettingsView),
 ]
+
+# Consistent content padding applied to the stack widget so every view
+# has breathing room from the sidebar without each view managing its own margins.
+_CONTENT_PADDING = 0   # views own their own top/left/right padding (24px)
 
 
 class MainWindow(QMainWindow):
@@ -58,7 +62,7 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # ── Health alert banner ─────────────────────────────────────────
+        # ── Health alert banner ─────────────────────────────────────────────
         self._alert_banner = QLabel("")
         self._alert_banner.setObjectName("alert_banner")
         self._alert_banner.setAlignment(Qt.AlignCenter)
@@ -68,13 +72,13 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.nav_buttons: list[QPushButton] = []
 
-        # ── Main area (sidebar + stack) ────────────────────────────────
+        # ── Main area (sidebar + stack) ─────────────────────────────────
         main_area = QWidget()
         main_layout = QHBoxLayout(main_area)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # ── Sidebar ────────────────────────────────────────────────────
+        # ── Sidebar ───────────────────────────────────────────────────────
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
         sidebar.setFixedWidth(220)
@@ -110,7 +114,13 @@ class MainWindow(QMainWindow):
         version_lbl.setStyleSheet("font-size: 11px;")
         side_layout.addWidget(version_lbl)
 
+        # ── Content area: add a left separator line between sidebar and views ──
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setStyleSheet("color: #2c2c2c;")
+
         main_layout.addWidget(sidebar)
+        main_layout.addWidget(sep)
         main_layout.addWidget(self.stack, 1)
 
         # Search bar
