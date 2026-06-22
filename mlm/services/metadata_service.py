@@ -165,3 +165,68 @@ class MetadataService:
         self.entities_repo.link_file_to_entity(media_file_id, entity_id)
         log.info("Manual match: file_id=%d → %s tmdb_id=%d", media_file_id, media_type, tmdb_id)
         return {"status": "matched", "title": title, "tmdb_id": tmdb_id}
+
+    def refresh_entity(self, entity_id: int) -> dict:
+        """Re-fetch TMDB metadata for an existing entity and update the DB.
+
+        Used by the "Refresh Metadata" button in MoviesView.
+        Returns a dict with 'status', 'title', and 'tmdb_id'.
+        Raises ValueError if the entity is not found or has no tmdb_id.
+        """
+        import json as _json
+
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT tmdb_id, media_type, title FROM media_entities WHERE id = ?",
+                (entity_id,),
+            ).fetchone()
+
+        if row is None:
+            raise ValueError(f"Entity id={entity_id} not found in database.")
+
+        tmdb_id    = row["tmdb_id"]
+        media_type = row["media_type"]
+        title      = row["title"]
+
+        if not tmdb_id:
+            raise ValueError(
+                f"Entity '{title}' (id={entity_id}) has no TMDB id — "
+                "use Manual Match first before refreshing."
+            )
+
+        if media_type == "movie":
+            details     = self.tmdb.movie_details(tmdb_id)
+            new_title   = details.get("title") or title
+            release     = details.get("release_date") or ""
+            year        = int(release[:4]) if len(release) >= 4 else None
+            rating      = details.get("vote_average")
+            genres_json = _json.dumps(details.get("genres", []))
+            poster      = details.get("poster_path")
+            plot        = details.get("overview")
+            meta_json   = _json.dumps(details)
+        else:
+            details     = self.tmdb.tv_details(tmdb_id)
+            new_title   = details.get("name") or title
+            air_date    = details.get("first_air_date") or ""
+            year        = int(air_date[:4]) if len(air_date) >= 4 else None
+            rating      = details.get("vote_average")
+            genres_json = _json.dumps(details.get("genres", []))
+            poster      = details.get("poster_path")
+            plot        = details.get("overview")
+            meta_json   = _json.dumps(details)
+
+        with get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE media_entities
+                SET title = ?, release_year = ?, rating = ?,
+                    genres_json = ?, poster_path = ?,
+                    plot = ?, metadata_json = ?
+                WHERE id = ?
+                """,
+                (new_title, year, rating, genres_json, poster, plot, meta_json, entity_id),
+            )
+
+        log.info("Refreshed metadata for entity_id=%d ('%s')", entity_id, new_title)
+        return {"status": "refreshed", "title": new_title, "tmdb_id": tmdb_id}
+
