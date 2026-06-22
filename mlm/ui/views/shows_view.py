@@ -1,21 +1,3 @@
-"""TV Shows view — summary table of all matched shows.
-
-Bug fixed: the previous SQL query counted seasons/episodes exclusively
-from the `episodes` table.  Files that exist on disk but haven't been
-linked into that table yet were invisible, causing:
-  - Seasons = 1 (only the one season with a linked episode)
-  - Have    = 1 (only that episode)
-  - Missing = 0 (nothing to compare against)
-  - 100%    (wrong — 1/1)
-
-Fix: `episodes_have` is now calculated as:
-  (linked episodes with is_missing=0)  +  (media_files rows with
-  season_number/episode_number that are NOT yet in the episodes table)
-so every file on disk is counted even if metadata linking is incomplete.
-
-The `seasons_count` is similarly broadened to include seasons found in
-media_files as well as in episodes.
-"""
 import json
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
@@ -43,7 +25,6 @@ class ShowsView(QWidget):
         title_lbl.setObjectName("h1")
         layout.addWidget(title_lbl)
 
-        # ── Toolbar ───────────────────────────────────────────────
         toolbar = QHBoxLayout()
 
         self.search_input = QLineEdit()
@@ -72,7 +53,6 @@ class ShowsView(QWidget):
         toolbar.addWidget(self.refresh_btn)
         layout.addLayout(toolbar)
 
-        # ── Table ─────────────────────────────────────────────────
         self.table = QTableView()
         self.table.setModel(self.model)
         self.table.horizontalHeader().setStretchLastSection(True)
@@ -90,67 +70,23 @@ class ShowsView(QWidget):
 
         self.load_rows()
 
-    # ── Data loading ──────────────────────────────────────────────
-
     def load_rows(self) -> None:
-        """Load all shows, counting episodes from both episodes table AND media_files."""
         with get_connection() as conn:
             rows = conn.execute(
                 """
                 SELECT
-                    me.id               AS entity_id,
+                    me.id                                                    AS entity_id,
                     me.title,
                     me.release_year,
                     me.rating,
                     me.genres_json,
-
-                    -- Seasons: union of seasons found in either table
-                    (
-                        SELECT COUNT(DISTINCT season_number) FROM (
-                            SELECT season_number FROM episodes
-                            WHERE entity_id = me.id AND season_number IS NOT NULL
-                            UNION
-                            SELECT season_number FROM media_files
-                            WHERE entity_id = me.id
-                              AND removed_at IS NULL
-                              AND season_number IS NOT NULL
-                        )
-                    ) AS seasons_count,
-
-                    -- Episodes you HAVE on disk (linked + unlinked media_files)
-                    (
-                        SELECT COUNT(*) FROM (
-                            -- linked episodes in episodes table
-                            SELECT season_number, episode_number
-                            FROM episodes
-                            WHERE entity_id = me.id AND is_missing = 0
-
-                            UNION
-
-                            -- files on disk not yet in episodes table
-                            SELECT mf.season_number, mf.episode_number
-                            FROM media_files mf
-                            WHERE mf.entity_id = me.id
-                              AND mf.removed_at IS NULL
-                              AND mf.season_number IS NOT NULL
-                              AND mf.episode_number IS NOT NULL
-                              AND NOT EXISTS (
-                                  SELECT 1 FROM episodes ep2
-                                  WHERE ep2.entity_id = me.id
-                                    AND ep2.season_number = mf.season_number
-                                    AND ep2.episode_number = mf.episode_number
-                              )
-                        )
-                    ) AS episodes_have,
-
-                    -- Episodes missing (TMDB says they exist, not on disk)
-                    (
-                        SELECT COUNT(*) FROM episodes
-                        WHERE entity_id = me.id AND is_missing = 1
-                    ) AS episodes_missing
-
+                    COUNT(DISTINCT ep.season_number)                         AS seasons_count,
+                    SUM(CASE WHEN ep.is_missing = 0 THEN 1 ELSE 0 END)      AS episodes_have,
+                    SUM(CASE WHEN ep.is_missing = 1 THEN 1 ELSE 0 END)      AS episodes_missing
                 FROM media_entities me
+                LEFT JOIN episodes ep ON ep.entity_id = me.id
                 WHERE me.media_type = 'show'
+                GROUP BY me.id
                 ORDER BY me.title ASC
                 """
             ).fetchall()
@@ -180,8 +116,6 @@ class ShowsView(QWidget):
     def _clear_search(self) -> None:
         self.search_input.clear()
 
-    # ── Check missing episodes ────────────────────────────────────
-
     def _check_missing(self) -> None:
         if self._worker and self._worker.isRunning():
             return
@@ -209,8 +143,6 @@ class ShowsView(QWidget):
     def _on_check_failed(self, message: str) -> None:
         self.check_btn.setEnabled(True)
         self.status_label.setText(f"Check failed: {message}")
-
-    # ── Detail window ─────────────────────────────────────────────
 
     def _open_detail(self, index) -> None:
         row = self.model.get_row(index.row())

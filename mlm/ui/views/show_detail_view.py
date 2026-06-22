@@ -1,33 +1,16 @@
-"""Show detail window: season summary cards + full episode list.
-
-Opened by double-clicking a show in ShowsView.
-Displays:
-  - One summary card per season: total / have / missing / completion %
-  - A filterable episode table: Season | Episode | Title | Air Date | Status | File
-Rows are colour-coded: green = on disk, red = missing.
-"""
+"""Show detail window: season summary cards + full episode list."""
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget,
     QTableWidgetItem, QComboBox, QPushButton, QHeaderView,
-    QFrame, QGridLayout, QScrollArea, QSizePolicy
+    QFrame, QScrollArea
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from mlm.db.connection import get_connection
 
 
-# ── Season summary card ───────────────────────────────────────────────────────
-
 class SeasonCard(QFrame):
-    """A compact card showing per-season stats."""
-
-    def __init__(
-        self,
-        season: int,
-        total: int,
-        have: int,
-        missing: int,
-    ) -> None:
+    def __init__(self, season: int, total: int, have: int, missing: int) -> None:
         super().__init__()
         self.setObjectName("stat_card")
         self.setFixedWidth(150)
@@ -56,8 +39,6 @@ class SeasonCard(QFrame):
         layout.addWidget(pct_lbl)
 
 
-# ── Main detail window ────────────────────────────────────────────────────────
-
 class ShowDetailView(QWidget):
     def __init__(self, entity_id: int, show_title: str) -> None:
         super().__init__()
@@ -69,7 +50,7 @@ class ShowDetailView(QWidget):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(12)
 
-        # ── Header row ────────────────────────────────────────────
+        # Header
         header = QHBoxLayout()
         title_lbl = QLabel(show_title)
         title_lbl.setObjectName("h1")
@@ -87,7 +68,7 @@ class ShowDetailView(QWidget):
         header.addWidget(self.refresh_btn)
         layout.addLayout(header)
 
-        # ── Season summary cards (scrollable row) ─────────────────
+        # Season summary cards
         self.cards_scroll = QScrollArea()
         self.cards_scroll.setWidgetResizable(True)
         self.cards_scroll.setFixedHeight(120)
@@ -103,16 +84,16 @@ class ShowDetailView(QWidget):
         self.cards_scroll.setWidget(self.cards_container)
         layout.addWidget(self.cards_scroll)
 
-        # ── Status bar ────────────────────────────────────────────
+        # Status
         self.status_label = QLabel("")
         self.status_label.setObjectName("muted")
         layout.addWidget(self.status_label)
 
-        # ── Episode table ─────────────────────────────────────────
+        # Episode table
         self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels([
-            "Season", "Episode", "Title", "Air Date", "Status", "File"
-        ])
+        self.table.setHorizontalHeaderLabels(
+            ["Season", "Episode", "Title", "Air Date", "Status", "File"]
+        )
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.table.verticalHeader().setVisible(False)
@@ -124,19 +105,9 @@ class ShowDetailView(QWidget):
 
         self._load_episodes()
 
-    # ── Data loading ──────────────────────────────────────────────
-
     def _load_episodes(self) -> None:
-        """Load all episode rows for this show.
-
-        Combines:
-        1. Rows from the `episodes` table (both present and missing).
-        2. media_files rows with season/episode parsed but not yet
-           in the episodes table — shown as \u2705 Available with their filename.
-        """
         with get_connection() as conn:
-            # Linked episodes (from episodes table)
-            linked = conn.execute(
+            rows = conn.execute(
                 """
                 SELECT
                     ep.season_number,
@@ -153,35 +124,7 @@ class ShowDetailView(QWidget):
                 (self.entity_id,),
             ).fetchall()
 
-            # Unlinked files on disk (season/episode parsed, not in episodes)
-            unlinked = conn.execute(
-                """
-                SELECT
-                    mf.season_number,
-                    mf.episode_number,
-                    NULL        AS episode_title,
-                    NULL        AS air_date,
-                    0           AS is_missing,
-                    mf.file_name
-                FROM media_files mf
-                WHERE mf.entity_id = ?
-                  AND mf.removed_at IS NULL
-                  AND mf.season_number IS NOT NULL
-                  AND mf.episode_number IS NOT NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM episodes ep
-                      WHERE ep.entity_id = mf.entity_id
-                        AND ep.season_number = mf.season_number
-                        AND ep.episode_number = mf.episode_number
-                  )
-                ORDER BY mf.season_number, mf.episode_number
-                """,
-                (self.entity_id,),
-            ).fetchall()
-
-        self._all_episodes = [dict(r) for r in linked] + [dict(r) for r in unlinked]
-        self._all_episodes.sort(key=lambda r: (r["season_number"], r["episode_number"]))
-
+        self._all_episodes = [dict(r) for r in rows]
         self._rebuild_season_combo()
         self._rebuild_season_cards()
         self._apply_filter()
@@ -199,8 +142,6 @@ class ShowDetailView(QWidget):
         self.season_combo.blockSignals(False)
 
     def _rebuild_season_cards(self) -> None:
-        """Replace season summary cards with fresh data."""
-        # Clear existing cards (keep the trailing stretch)
         while self.cards_layout.count() > 1:
             item = self.cards_layout.takeAt(0)
             if item and item.widget():
@@ -211,18 +152,14 @@ class ShowDetailView(QWidget):
             eps = [e for e in self._all_episodes if e["season_number"] == s]
             have    = sum(1 for e in eps if not e["is_missing"])
             missing = sum(1 for e in eps if e["is_missing"])
-            total   = len(eps)
-            card = SeasonCard(season=s, total=total, have=have, missing=missing)
+            card = SeasonCard(season=s, total=len(eps), have=have, missing=missing)
             self.cards_layout.insertWidget(self.cards_layout.count() - 1, card)
-
-    # ── Filtering & table rendering ───────────────────────────────
 
     def _apply_filter(self) -> None:
         season_data = self.season_combo.currentData()
         episodes = (
             [e for e in self._all_episodes if e["season_number"] == season_data]
-            if season_data is not None
-            else self._all_episodes
+            if season_data is not None else self._all_episodes
         )
 
         self.table.setSortingEnabled(False)
@@ -234,16 +171,16 @@ class ShowDetailView(QWidget):
 
             is_missing = bool(ep["is_missing"])
             status_text = "❌ Missing" if is_missing else "✅ Available"
-            row_color = QColor("#ef9a9a") if is_missing else QColor("#81c784")
-            muted = QColor("#e0e0e0")
+            row_color   = QColor("#ef9a9a") if is_missing else QColor("#81c784")
+            muted       = QColor("#e0e0e0")
 
             cells = [
-                (str(ep["season_number"]),   muted),
-                (str(ep["episode_number"]),  muted),
-                (ep["episode_title"] or "",  muted),
-                (ep["air_date"] or "",        muted),
-                (status_text,                 row_color),
-                (ep["file_name"] or "",       muted),
+                (str(ep["season_number"]),  muted),
+                (str(ep["episode_number"]), muted),
+                (ep["episode_title"] or "", muted),
+                (ep["air_date"] or "",       muted),
+                (status_text,                row_color),
+                (ep["file_name"] or "",      muted),
             ]
             for col, (text, color) in enumerate(cells):
                 item = QTableWidgetItem(text)
@@ -253,7 +190,6 @@ class ShowDetailView(QWidget):
 
         self.table.setSortingEnabled(True)
 
-        # ── Status bar summary ────────────────────────────────────
         total   = len(episodes)
         missing = sum(1 for e in episodes if e["is_missing"])
         have    = total - missing
