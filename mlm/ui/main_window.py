@@ -15,11 +15,12 @@ Layout
   └─────────────────────────────────────────────────────┘
 
 Sidebar: painted hero gradient with icon + label nav items.
-Each nav item is a 180px-wide button showing icon + section name.
+Each nav item is a 180px-wide button showing icon + label.
+Health item shows a red badge dot when corrupted files exist.
 """
 import logging
 
-from PySide6.QtCore import Qt, QPoint, QThread, QRect, QRectF, QSize
+from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QSize
 from PySide6.QtGui import (
     QColor, QPainter, QLinearGradient, QRadialGradient,
     QBrush, QPen, QPainterPath, QFont, QFontMetrics
@@ -28,7 +29,7 @@ from PySide6.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QMainWindow,
     QProgressBar, QPushButton,
     QStackedWidget, QVBoxLayout, QWidget, QApplication,
-    QSizePolicy, QGraphicsDropShadowEffect,
+    QSizePolicy,
 )
 
 from mlm.db.repositories.settings_repo import SettingsRepository
@@ -46,6 +47,7 @@ from mlm.ui.views.rename_view       import RenameView
 from mlm.ui.views.health_view       import HealthView
 from mlm.ui.views.reports_view      import ReportsView
 from mlm.ui.views.settings_view     import SettingsView
+from mlm.services.corrupted_folders_service import CorruptedFoldersService
 
 log = logging.getLogger(__name__)
 
@@ -60,14 +62,16 @@ NAV_ITEMS = [
     ("♥",  "Watchlist",    WatchlistView),
     ("⊜",  "Duplicates",   DuplicatesView),
     ("✎",  "Rename",       RenameView),
-    ("✦",  "Health",       HealthView),
+    ("✦",  "Health",       HealthView),     # index 9 — badge target
     ("◈",  "Reports",      ReportsView),
     ("⚙",  "Settings",     SettingsView),
 ]
 
+_HEALTH_NAV_INDEX = 9
+
 _ACCENT      = QColor(124, 111, 255)
-_SIDEBAR_BG1 = QColor(8,   6,  22)     # top of sidebar gradient
-_SIDEBAR_BG2 = QColor(12, 10, 28)     # bottom
+_SIDEBAR_BG1 = QColor(8,   6,  22)
+_SIDEBAR_BG2 = QColor(12, 10, 28)
 _ITEM_H      = 42
 
 
@@ -75,24 +79,27 @@ _ITEM_H      = 42
 class _HeroSidebar(QWidget):
     """
     Fully custom-painted sidebar.
-    Draws its own gradient background, logo mark, divider,
-    and all nav items — no stylesheet needed.
+    _badge_count > 0 draws a red dot next to the Health item.
     """
-    _nav_clicked = None   # injected by MainWindow
+    _nav_clicked = None
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setFixedWidth(180)
-        self._active = 0
-        self._hovered = -1
+        self._active   = 0
+        self._hovered  = -1
+        self._badge_count = 0      # corrupted-folder count; 0 = no badge
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
-        # reserve top for logo + divider
         self._nav_top = 90
-        self._item_rects: list[QRect] = []
 
     def set_active(self, index: int) -> None:
         self._active = index
+        self.update()
+
+    def set_health_badge(self, count: int) -> None:
+        """Set the number shown on the Health sidebar badge. 0 = hidden."""
+        self._badge_count = count
         self.update()
 
     def _item_rect(self, i: int) -> QRect:
@@ -105,17 +112,17 @@ class _HeroSidebar(QWidget):
         p.setRenderHint(QPainter.TextAntialiasing)
         w, h = self.width(), self.height()
 
-        # ─ Background gradient
+        # Background
         bg = QLinearGradient(0, 0, 0, h)
         bg.setColorAt(0, _SIDEBAR_BG1)
         bg.setColorAt(1, _SIDEBAR_BG2)
         p.fillRect(0, 0, w, h, bg)
 
-        # ─ Right border
+        # Right border
         p.setPen(QPen(QColor(255, 255, 255, 12), 1))
         p.drawLine(w - 1, 0, w - 1, h)
 
-        # ─ Logo area: large glowing diamond
+        # Logo
         lf = QFont("Segoe UI Symbol", 24)
         p.setFont(lf)
         logo_grad = QLinearGradient(0, 18, w, 50)
@@ -126,17 +133,15 @@ class _HeroSidebar(QWidget):
         p.setPen(pen)
         p.drawText(QRect(0, 14, w, 42), Qt.AlignCenter, "◈")
 
-        # App name
         af = QFont("Segoe UI", 8, QFont.Bold)
         p.setFont(af)
         p.setPen(QColor(80, 75, 120))
         p.drawText(QRect(0, 52, w, 16), Qt.AlignCenter, "MEDIA LIBRARY")
 
-        # Divider
         p.setPen(QPen(QColor(255, 255, 255, 10), 1))
         p.drawLine(20, 76, w - 20, 76)
 
-        # ─ Nav items
+        # Nav items
         icon_font  = QFont("Segoe UI Symbol", 14)
         label_font = QFont("Segoe UI", 9)
         label_font.setWeight(QFont.Medium)
@@ -144,22 +149,19 @@ class _HeroSidebar(QWidget):
         n = len(NAV_ITEMS)
         for i, (icon, label, _) in enumerate(NAV_ITEMS):
             rect = self._item_rect(i)
-            is_active  = (i == self._active)
-            is_hovered = (i == self._hovered)
             is_settings = (i == n - 1)
-
-            # Push Settings to near-bottom
             if is_settings:
                 rect = QRect(10, h - _ITEM_H - 14, w - 20, _ITEM_H)
 
-            # Active background pill
+            is_active  = (i == self._active)
+            is_hovered = (i == self._hovered)
+
             if is_active:
                 pill = QPainterPath()
                 pill.addRoundedRect(QRectF(rect), 10, 10)
                 fill = QColor(_ACCENT)
                 fill.setAlpha(40)
                 p.fillPath(pill, fill)
-                # Left accent bar
                 bar = QPainterPath()
                 bar.addRoundedRect(QRectF(rect.left(), rect.top() + 6, 3, rect.height() - 12), 1.5, 1.5)
                 p.fillPath(bar, _ACCENT)
@@ -168,25 +170,29 @@ class _HeroSidebar(QWidget):
                 pill.addRoundedRect(QRectF(rect), 10, 10)
                 p.fillPath(pill, QColor(255, 255, 255, 8))
 
-            # Icon
             p.setFont(icon_font)
-            if is_active:
-                p.setPen(_ACCENT)
-            elif is_hovered:
-                p.setPen(QColor(200, 200, 230))
-            else:
-                p.setPen(QColor(70, 68, 100))
+            p.setPen(_ACCENT if is_active else QColor(200, 200, 230) if is_hovered else QColor(70, 68, 100))
             p.drawText(QRect(rect.left() + 10, rect.top(), 28, rect.height()), Qt.AlignVCenter | Qt.AlignLeft, icon)
 
-            # Label
             p.setFont(label_font)
-            if is_active:
-                p.setPen(QColor(230, 225, 255))
-            elif is_hovered:
-                p.setPen(QColor(180, 178, 210))
-            else:
-                p.setPen(QColor(70, 68, 100))
+            p.setPen(QColor(230, 225, 255) if is_active else QColor(180, 178, 210) if is_hovered else QColor(70, 68, 100))
             p.drawText(QRect(rect.left() + 42, rect.top(), rect.width() - 44, rect.height()), Qt.AlignVCenter | Qt.AlignLeft, label)
+
+            # ── Health badge: red dot with count number
+            if i == _HEALTH_NAV_INDEX and self._badge_count > 0:
+                badge_text = str(self._badge_count) if self._badge_count < 100 else "99+"
+                bf = QFont("Segoe UI", 7, QFont.Bold)
+                bfm = QFontMetrics(bf)
+                badge_w = max(bfm.horizontalAdvance(badge_text) + 8, 18)
+                badge_h = 14
+                bx = rect.right() - badge_w - 4
+                by = rect.top() + (rect.height() - badge_h) // 2
+                badge_path = QPainterPath()
+                badge_path.addRoundedRect(QRectF(bx, by, badge_w, badge_h), 7, 7)
+                p.fillPath(badge_path, QColor(239, 83, 80, 220))
+                p.setFont(bf)
+                p.setPen(QColor(255, 255, 255))
+                p.drawText(QRect(int(bx), int(by), badge_w, badge_h), Qt.AlignCenter, badge_text)
 
     def mouseMoveEvent(self, e):
         n = len(NAV_ITEMS)
@@ -294,36 +300,30 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Title bar
         self._title_bar = _TitleBar(self)
         root.addWidget(self._title_bar)
 
-        # Alert banner
         self._alert_banner = QLabel("")
         self._alert_banner.setObjectName("alert_banner")
         self._alert_banner.setAlignment(Qt.AlignCenter)
         self._alert_banner.setVisible(False)
         root.addWidget(self._alert_banner)
 
-        # Body
         body = QWidget()
         body_lay = QHBoxLayout(body)
         body_lay.setContentsMargins(0, 0, 0, 0)
         body_lay.setSpacing(0)
 
-        # Hero sidebar
         self._sidebar = _HeroSidebar()
         self._sidebar._nav_clicked = self.switch_view
         body_lay.addWidget(self._sidebar)
 
-        # Right panel
         right = QWidget()
         right.setObjectName("right_panel")
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_lay.setSpacing(0)
 
-        # Top bar
         top_bar = QWidget()
         top_bar.setObjectName("top_bar")
         top_bar.setFixedHeight(50)
@@ -331,23 +331,19 @@ class MainWindow(QMainWindow):
         tb_lay.setContentsMargins(20, 6, 20, 6)
         tb_lay.setSpacing(14)
 
-        # Breadcrumb label (updates with active section)
         self._breadcrumb = QLabel("Dashboard")
         self._breadcrumb.setStyleSheet(
             "color: #30304a; font-size: 11px; font-weight: 600;"
             "letter-spacing: 0.5px; background: transparent;"
         )
         tb_lay.addWidget(self._breadcrumb)
-
         tb_lay.addStretch()
 
-        # Stack & nav buttons (nav_buttons kept for GlobalSearchBar compatibility)
         self.stack = QStackedWidget()
         self.nav_buttons: list[QPushButton] = []
         for index, (icon, label, ViewClass) in enumerate(NAV_ITEMS):
             view = ViewClass()
             self.stack.addWidget(view)
-            # Dummy invisible button so GlobalSearchBar still works
             btn = QPushButton()
             btn.setCheckable(True)
             btn.setVisible(False)
@@ -372,17 +368,14 @@ class MainWindow(QMainWindow):
         tb_lay.addWidget(self._progress_bar)
 
         right_lay.addWidget(top_bar)
-
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
         sep.setObjectName("top_separator")
         right_lay.addWidget(sep)
-
         right_lay.addWidget(self.stack, 1)
         body_lay.addWidget(right, 1)
         root.addWidget(body, 1)
 
-        # Status bar
         status = QFrame()
         status.setObjectName("status_bar")
         status.setFixedHeight(24)
@@ -398,6 +391,16 @@ class MainWindow(QMainWindow):
         self._active_workers = 0
         density = settings.get("ui_row_density", "comfortable")
         self._row_height = 20 if density == "compact" else 28
+
+        # Wire the corrupted-folders badge: connect HealthView panel signal
+        health_view: HealthView = self.stack.widget(_HEALTH_NAV_INDEX)
+        health_view.corrupted_panel.folder_count_changed.connect(
+            self._sidebar.set_health_badge
+        )
+        # Initialise badge from current DB state (no scan needed)
+        self._sidebar.set_health_badge(
+            CorruptedFoldersService().total_corrupted_files()
+        )
 
         self._check_startup_health()
         self.switch_view(0)
@@ -419,7 +422,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log.warning("Startup health check: %s", exc)
 
-    def track_worker(self, worker: QThread, task_label: str = "Working…") -> None:
+    def track_worker(self, worker, task_label: str = "Working…") -> None:
         self._active_workers += 1
         self._activity_label.setText(task_label)
         self._progress_bar.setRange(0, 0)

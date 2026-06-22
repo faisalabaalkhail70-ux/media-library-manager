@@ -1,12 +1,16 @@
+"""Health view — now includes the CorruptedFoldersPanel above the results table."""
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView,
-    QProgressBar, QGroupBox, QAbstractItemView
+    QProgressBar, QGroupBox, QAbstractItemView, QFrame,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
+
 from mlm.workers.health_worker import HealthWorker
 from mlm.db.connection import get_connection
+from mlm.ui.corrupted_folders_panel import CorruptedFoldersPanel
+from mlm.ui.widgets import SectionHeader
 
 
 STATUS_COLORS = {
@@ -23,52 +27,64 @@ class HealthView(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(14)
+        layout.setSpacing(16)
 
+        # ── Page title
         title = QLabel("File Health Checks")
         title.setObjectName("h1")
         layout.addWidget(title)
 
-        # ── Toolbar ───────────────────────────────────────────────
+        # ── Toolbar
         toolbar = QHBoxLayout()
-
         self.scan_btn = QPushButton("Run Health Scan")
         self.scan_btn.setObjectName("primary")
         self.scan_btn.clicked.connect(self.run_scan)
-
         self.refresh_btn = QPushButton("Refresh Results")
         self.refresh_btn.clicked.connect(self.load_rows)
-
         self.status_label = QLabel("No scan performed yet.")
         self.status_label.setObjectName("muted")
-
         toolbar.addWidget(self.scan_btn)
         toolbar.addWidget(self.refresh_btn)
         toolbar.addStretch()
         toolbar.addWidget(self.status_label)
         layout.addLayout(toolbar)
 
-        # ── Progress ──────────────────────────────────────────────
+        # ── Progress bar
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)
         self.progress.hide()
         layout.addWidget(self.progress)
 
-        # ── Summary Cards ─────────────────────────────────────────
+        # ── Summary cards (OK / Warnings / Errors)
         summary_row = QHBoxLayout()
         summary_row.setSpacing(12)
-
         self.ok_card    = self._summary_card("OK",       "0", "#81c784")
         self.warn_card  = self._summary_card("Warnings", "0", "#fff176")
         self.error_card = self._summary_card("Errors",   "0", "#ef5350")
-
         summary_row.addWidget(self.ok_card[0])
         summary_row.addWidget(self.warn_card[0])
         summary_row.addWidget(self.error_card[0])
         summary_row.addStretch()
         layout.addLayout(summary_row)
 
-        # ── Results Table ─────────────────────────────────────────
+        # ──────────────────────────────────────────────────────────
+        # ── CORRUPTED FOLDERS PANEL  (new)
+        # ──────────────────────────────────────────────────────────
+        self.corrupted_panel = CorruptedFoldersPanel()
+        layout.addWidget(self.corrupted_panel)
+
+        # thin separator between the panel and the file-level table
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: rgba(255,255,255,8);")
+        layout.addWidget(sep)
+
+        # ── File-level results table (existing behaviour)
+        layout.addWidget(SectionHeader(
+            "All Scanned Files",
+            "Every file that has been health-checked, sorted by severity",
+            QColor(120, 144, 156),
+        ))
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["Status", "Filename", "Notes", "Path"])
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
@@ -82,10 +98,8 @@ class HealthView(QWidget):
 
         self.load_rows()
 
-    # ── Helpers ───────────────────────────────────────────────────
-
+    # ── Helpers
     def _summary_card(self, label: str, value: str, color: str) -> tuple:
-        from PySide6.QtWidgets import QFrame
         card = QFrame()
         card.setObjectName("stat_card")
         card.setFixedSize(130, 70)
@@ -108,9 +122,11 @@ class HealthView(QWidget):
         self.warn_card[1].setText(str(counts.get("warning", 0)))
         self.error_card[1].setText(str(counts.get("error", 0)))
 
-    # ── Data ──────────────────────────────────────────────────────
-
+    # ── Data
     def load_rows(self) -> None:
+        # Reload the corrupted folders panel first
+        self.corrupted_panel.reload()
+
         with get_connection() as conn:
             rows = conn.execute(
                 """
@@ -131,21 +147,18 @@ class HealthView(QWidget):
         rows = [dict(r) for r in rows]
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
-
         counts = {"ok": 0, "warning": 0, "error": 0}
 
         for row in rows:
             status = row.get("health_status") or "ok"
             counts[status] = counts.get(status, 0) + 1
             color = QColor(STATUS_COLORS.get(status, "#e0e0e0"))
-
             row_idx = self.table.rowCount()
             self.table.insertRow(row_idx)
-
             cells = [
                 status.upper(),
                 row.get("file_name", ""),
-                row.get("health_notes", "") or "\u2014",
+                row.get("health_notes", "") or "—",
                 row.get("file_path", ""),
             ]
             for col, text in enumerate(cells):
@@ -159,22 +172,20 @@ class HealthView(QWidget):
 
         total = len(rows)
         if total == 0:
-            self.status_label.setText("No health data \u2014 run a scan first.")
+            self.status_label.setText("No health data — run a scan first.")
         else:
             self.status_label.setText(
-                f"{total} files checked \u2014 {counts['ok']} OK, "
+                f"{total} files checked — {counts['ok']} OK, "
                 f"{counts['warning']} warnings, {counts['error']} errors"
             )
 
-    # ── Actions ───────────────────────────────────────────────────
-
+    # ── Actions
     def run_scan(self) -> None:
         if self.worker and self.worker.isRunning():
             return
         self.scan_btn.setEnabled(False)
         self.progress.show()
         self.status_label.setText("Running health scan...")
-
         self.worker = HealthWorker()
         self.worker.finished_scan.connect(self.on_finished)
         self.worker.failed.connect(self.on_failed)
