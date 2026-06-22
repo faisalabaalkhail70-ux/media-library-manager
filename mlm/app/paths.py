@@ -1,3 +1,4 @@
+"""Resolve application directory paths and ensure they exist."""
 from pathlib import Path
 
 APP_NAME = "Atlas"
@@ -8,7 +9,9 @@ DB_PATH = DATA_DIR / "app.db"
 LOG_DIR = DATA_DIR / "logs"
 EXPORT_DIR = DATA_DIR / "exports"
 
+
 def ensure_app_dirs() -> None:
+    """Create required data directories if they do not exist."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
