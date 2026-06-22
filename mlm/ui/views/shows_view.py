@@ -112,22 +112,29 @@ class ShowsView(QWidget):
         with get_connection() as conn:
             rows = conn.execute(
                 """
+                WITH season_summary AS (
+                    -- Aggregate per (entity, season) first to avoid correlated subqueries
+                    SELECT
+                        entity_id,
+                        season_number,
+                        SUM(CASE WHEN is_missing = 0 THEN 1 ELSE 0 END) AS present_count,
+                        SUM(CASE WHEN is_missing = 1 THEN 1 ELSE 0 END) AS missing_count
+                    FROM episodes
+                    GROUP BY entity_id, season_number
+                )
                 SELECT
                     me.id AS entity_id,
                     me.title, me.release_year, me.rating, me.genres_json, me.poster_path,
-                    COUNT(DISTINCT CASE WHEN ep.is_missing = 0
-                          THEN ep.season_number END)                            AS seasons_have,
-                    COUNT(DISTINCT CASE
-                        WHEN ep.is_missing = 1
-                         AND ep.season_number NOT IN (
-                             SELECT season_number FROM episodes e2
-                             WHERE e2.entity_id = me.id AND e2.is_missing = 0
-                         )
-                        THEN ep.season_number END)                             AS seasons_missing,
-                    SUM(CASE WHEN ep.is_missing = 0 THEN 1 ELSE 0 END)        AS episodes_have,
-                    SUM(CASE WHEN ep.is_missing = 1 THEN 1 ELSE 0 END)        AS episodes_missing
+                    -- seasons_have: seasons with at least one episode present
+                    COUNT(DISTINCT CASE WHEN ss.present_count > 0
+                          THEN ss.season_number END)                           AS seasons_have,
+                    -- seasons_missing: seasons with NO episodes at all present
+                    COUNT(DISTINCT CASE WHEN ss.present_count = 0
+                          THEN ss.season_number END)                           AS seasons_missing,
+                    SUM(COALESCE(ss.present_count, 0))                         AS episodes_have,
+                    SUM(COALESCE(ss.missing_count, 0))                         AS episodes_missing
                 FROM media_entities me
-                LEFT JOIN episodes ep ON ep.entity_id = me.id
+                LEFT JOIN season_summary ss ON ss.entity_id = me.id
                 WHERE me.media_type = 'show'
                 GROUP BY me.id
                 ORDER BY me.title ASC
