@@ -25,7 +25,28 @@ from PySide6.QtGui import QColor
 from mlm.db.repositories.watchlist_repo import WatchlistRepository
 
 
-# ── Table model ───────────────────────────────────────────────────────
+# ── Shared palette
+_GREEN   = QColor("#81c784")
+_YELLOW  = QColor("#fff176")
+_AMBER   = QColor("#ffa726")
+_RED     = QColor("#ef9a9a")
+_CYAN    = QColor("#4dd0e1")
+_MUTED   = QColor("#6e6e8a")
+_NORMAL  = QColor("#d0d0e8")
+_WATCHED = QColor("#505060")   # dim grey for already-watched rows
+
+
+def _rating_color(rating) -> QColor:
+    try:
+        r = float(rating)
+    except (TypeError, ValueError):
+        return _MUTED
+    if r >= 7.0: return _GREEN
+    if r >= 5.0: return _YELLOW
+    return _RED
+
+
+# ── Table model
 class _WatchlistModel(QAbstractTableModel):
     HEADERS = ["Priority", "Title", "Type", "Year", "Rating", "Added", "Watched", "Notes"]
     _COL_PRIO    = 0
@@ -65,9 +86,11 @@ class _WatchlistModel(QAbstractTableModel):
             return None
         row = self._rows[index.row()]
         col = index.column()
+        is_watched = bool(row.get("watched_at"))
+        prio = row.get("priority", 5)
 
         if role == Qt.DisplayRole:
-            if col == self._COL_PRIO:    return str(row.get("priority", ""))
+            if col == self._COL_PRIO:    return str(prio)
             if col == self._COL_TITLE:   return row.get("title", "")
             if col == self._COL_TYPE:    return row.get("media_type", "").capitalize()
             if col == self._COL_YEAR:    return str(row.get("release_year") or "")
@@ -79,21 +102,44 @@ class _WatchlistModel(QAbstractTableModel):
             if col == self._COL_NOTES:   return row.get("notes", "") or ""
 
         if role == Qt.ForegroundRole:
-            if row.get("watched_at"):
-                return QColor("#9e9e9e")   # muted grey for watched
-            prio = row.get("priority", 5)
+            # Watched rows: everything dimmed to a single muted tone
+            if is_watched:
+                return _WATCHED
+
+            # Priority column: traffic-light (1–3 urgent red, 4–6 amber, 7–10 green)
             if col == self._COL_PRIO:
-                if prio <= 3: return QColor("#ef5350")   # high → red
-                if prio <= 6: return QColor("#ffa726")   # mid  → amber
-                return QColor("#66bb6a")                 # low  → green
+                if prio <= 3: return _RED
+                if prio <= 6: return _AMBER
+                return _GREEN
+
+            # Rating column: color by score
+            if col == self._COL_RATING:
+                return _rating_color(row.get("rating"))
+
+            # Type: movie = blue, show = green, other = muted
+            if col == self._COL_TYPE:
+                mtype = (row.get("media_type") or "").lower()
+                if mtype == "movie": return _CYAN
+                if mtype == "show":  return _GREEN
+                return _MUTED
+
+            # Watched date: green tick-tone when filled
+            if col == self._COL_WATCHED:
+                return _GREEN if row.get("watched_at") else _MUTED
+
+            # Year, Added, Notes: muted
+            if col in (self._COL_YEAR, self._COL_ADDED, self._COL_NOTES):
+                return _MUTED
+
+            return _NORMAL
 
         if role == Qt.UserRole:
-            return row.get("id")   # watchlist.id
+            return row.get("id")
 
         return None
 
 
-# ── Add dialog ───────────────────────────────────────────────────────
+# ── Add dialog
 class _AddDialog(QDialog):
     def __init__(self, repo: WatchlistRepository, parent=None) -> None:
         super().__init__(parent)
@@ -168,7 +214,7 @@ class _AddDialog(QDialog):
     def notes(self) -> str: return self._notes.toPlainText().strip()
 
 
-# ── Tab widget helper ──────────────────────────────────────────────────
+# ── Tab widget helper
 def _make_table(model, proxy) -> QTableView:
     t = QTableView()
     t.setModel(proxy)
@@ -183,7 +229,7 @@ def _make_table(model, proxy) -> QTableView:
     return t
 
 
-# ── Main view ────────────────────────────────────────────────────────────
+# ── Main view
 class WatchlistView(QWidget):
     def __init__(self) -> None:
         super().__init__()
@@ -193,7 +239,6 @@ class WatchlistView(QWidget):
         outer.setContentsMargins(24, 20, 24, 20)
         outer.setSpacing(12)
 
-        # Header
         hdr = QHBoxLayout()
         title = QLabel("Watchlist")
         title.setObjectName("h1")
@@ -204,11 +249,10 @@ class WatchlistView(QWidget):
         hdr.addWidget(self._count_lbl)
         outer.addLayout(hdr)
 
-        # Toolbar
         toolbar = QHBoxLayout()
         add_btn = QPushButton("+ Add to Watchlist")
         add_btn.clicked.connect(self._add)
-        self._watch_btn = QPushButton("\u2713 Mark Watched")
+        self._watch_btn = QPushButton("✓ Mark Watched")
         self._watch_btn.clicked.connect(self._mark_watched)
         self._unwatch_btn = QPushButton("Unwatch")
         self._unwatch_btn.clicked.connect(self._mark_unwatched)
@@ -224,25 +268,20 @@ class WatchlistView(QWidget):
         toolbar.addWidget(export_btn)
         outer.addLayout(toolbar)
 
-        # Tabs: Pending / Watched / All
         self._tabs = QTabWidget()
 
-        # Pending tab
         self._pending_model = _WatchlistModel()
         self._pending_proxy = QSortFilterProxyModel()
         self._pending_table = _make_table(self._pending_model, self._pending_proxy)
-        self._tabs.addTab(self._pending_table, "\u23f3 Pending")
+        self._tabs.addTab(self._pending_table, "⏳ Pending")
 
-        # Watched tab
         self._watched_model = _WatchlistModel()
         self._watched_proxy = QSortFilterProxyModel()
         self._watched_table = _make_table(self._watched_model, self._watched_proxy)
-        self._tabs.addTab(self._watched_table, "\u2713 Watched")
+        self._tabs.addTab(self._watched_table, "✓ Watched")
 
         outer.addWidget(self._tabs, 1)
         self.load_rows()
-
-    # ── Data ────────────────────────────────────────────────────
 
     def load_rows(self) -> None:
         pending = self._repo.list_items(watched=False)
@@ -250,10 +289,11 @@ class WatchlistView(QWidget):
         self._pending_model.set_rows(pending)
         self._watched_model.set_rows(watched)
         total = len(pending) + len(watched)
-        self._count_lbl.setText(f"{len(pending)} pending \u2014 {len(watched)} watched \u2014 {total} total")
-        tab0 = self._tabs.tabText(0).split(" ")[0]
-        self._tabs.setTabText(0, f"\u23f3 Pending ({len(pending)})")
-        self._tabs.setTabText(1, f"\u2713 Watched ({len(watched)})")
+        self._count_lbl.setText(
+            f"{len(pending)} pending — {len(watched)} watched — {total} total"
+        )
+        self._tabs.setTabText(0, f"⏳ Pending ({len(pending)})")
+        self._tabs.setTabText(1, f"✓ Watched ({len(watched)})")
 
     def _current_row(self) -> dict | None:
         tab = self._tabs.currentIndex()
@@ -265,8 +305,6 @@ class WatchlistView(QWidget):
             return None
         src_idx = proxy.mapToSource(sel[0])
         return model.get_row(src_idx.row())
-
-    # ── Actions ──────────────────────────────────────────────────
 
     def _add(self) -> None:
         dlg = _AddDialog(self._repo, parent=self)

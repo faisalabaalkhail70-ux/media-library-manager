@@ -1,8 +1,18 @@
+"""Qt table model for the Library / all-files view — with semantic color coding."""
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtGui import QColor
+
+_GREEN   = QColor("#81c784")
+_YELLOW  = QColor("#fff176")
+_AMBER   = QColor("#ffa726")
+_RED     = QColor("#ef9a9a")
+_CYAN    = QColor("#4dd0e1")
+_MUTED   = QColor("#6e6e8a")
+_NORMAL  = QColor("#d0d0e8")
+_UNMATCHED = QColor("#ef5350")  # brighter red for Unmatched label
 
 
 def _fmt_size(size_bytes: int | None) -> str:
-    """Human-readable size: bytes → KB / MB / GB."""
     if not size_bytes:
         return ""
     if size_bytes < 1024:
@@ -12,6 +22,30 @@ def _fmt_size(size_bytes: int | None) -> str:
     if size_bytes < 1024 ** 3:
         return f"{size_bytes / 1024 ** 2:.0f} MB"
     return f"{size_bytes / 1024 ** 3:.2f} GB"
+
+
+def _res_color(res: str | None) -> QColor:
+    if not res:
+        return _MUTED
+    w = res.split("x")[0] if "x" in res else res.lower().replace("p", "")
+    try:
+        w = int(w)
+    except ValueError:
+        return _MUTED
+    if w >= 3840: return _CYAN
+    if w >= 1920: return _GREEN
+    if w >= 1280: return _YELLOW
+    return _AMBER
+
+
+def _size_color(size_bytes: int | None) -> QColor:
+    if not size_bytes:
+        return _MUTED
+    gb = size_bytes / (1024 ** 3)
+    if gb >= 20: return _CYAN
+    if gb >= 4:  return _GREEN
+    if gb >= 1:  return _YELLOW
+    return _MUTED
 
 
 class MediaFilesTableModel(QAbstractTableModel):
@@ -28,7 +62,6 @@ class MediaFilesTableModel(QAbstractTableModel):
         "Path",
     ]
 
-    # Map column index → row key for sorting
     _SORT_KEYS = [
         "id",
         "file_name",
@@ -36,11 +69,22 @@ class MediaFilesTableModel(QAbstractTableModel):
         "release_year",
         "resolution",
         "video_codec",
-        "file_size_bytes",   # sort numerically even though display is formatted
+        "file_size_bytes",
         "duration_seconds",
         "modified_at",
         "file_path",
     ]
+
+    _COL_ID       = 0
+    _COL_FILENAME = 1
+    _COL_TITLE    = 2
+    _COL_YEAR     = 3
+    _COL_RES      = 4
+    _COL_CODEC    = 5
+    _COL_SIZE     = 6
+    _COL_DUR      = 7
+    _COL_MOD      = 8
+    _COL_PATH     = 9
 
     def __init__(self, rows: list[dict] | None = None) -> None:
         super().__init__()
@@ -96,13 +140,35 @@ class MediaFilesTableModel(QAbstractTableModel):
             ]
             return values[col]
 
+        if role == Qt.ForegroundRole:
+            # Matched Title: bright red for Unmatched
+            if col == self._COL_TITLE:
+                matched = row.get("matched_title", "")
+                return _UNMATCHED if not matched else _GREEN
+            # Resolution: quality gradient
+            if col == self._COL_RES:
+                return _res_color(row.get("resolution"))
+            # File size: scale by GB
+            if col == self._COL_SIZE:
+                return _size_color(row.get("file_size_bytes"))
+            # Codec: highlight common codecs
+            if col == self._COL_CODEC:
+                codec = (row.get("video_codec") or "").lower()
+                if codec in ("hevc", "h265", "av1"):   return _CYAN    # modern
+                if codec in ("h264", "avc"):            return _GREEN   # good
+                if codec in ("mpeg2", "mpeg4", "xvid"): return _AMBER   # legacy
+                return _MUTED
+            # Path and filename: muted
+            if col in (self._COL_PATH, self._COL_FILENAME):
+                return _MUTED
+            return _NORMAL
+
         if role == Qt.UserRole:
-            # Raw value used for sorting
             key = self._SORT_KEYS[col] if col < len(self._SORT_KEYS) else None
             return row.get(key) if key else None
 
         if role == Qt.TextAlignmentRole:
-            if col in {0, 3, 6}:
+            if col in {self._COL_ID, self._COL_YEAR, self._COL_SIZE}:
                 return int(Qt.AlignRight | Qt.AlignVCenter)
 
         return None
