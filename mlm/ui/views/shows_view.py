@@ -75,14 +75,29 @@ class ShowsView(QWidget):
             rows = conn.execute(
                 """
                 SELECT
-                    me.id                                                    AS entity_id,
+                    me.id                                                       AS entity_id,
                     me.title,
                     me.release_year,
                     me.rating,
                     me.genres_json,
-                    COUNT(DISTINCT ep.season_number)                         AS seasons_count,
-                    SUM(CASE WHEN ep.is_missing = 0 THEN 1 ELSE 0 END)      AS episodes_have,
-                    SUM(CASE WHEN ep.is_missing = 1 THEN 1 ELSE 0 END)      AS episodes_missing
+
+                    -- Seasons that have at least one episode on disk
+                    COUNT(DISTINCT CASE WHEN ep.is_missing = 0
+                          THEN ep.season_number END)                            AS seasons_have,
+
+                    -- Seasons that have at least one missing episode
+                    -- but zero present ones (fully absent season)
+                    COUNT(DISTINCT CASE
+                        WHEN ep.is_missing = 1
+                         AND ep.season_number NOT IN (
+                             SELECT season_number FROM episodes e2
+                             WHERE e2.entity_id = me.id AND e2.is_missing = 0
+                         )
+                        THEN ep.season_number END)                             AS seasons_missing,
+
+                    SUM(CASE WHEN ep.is_missing = 0 THEN 1 ELSE 0 END)        AS episodes_have,
+                    SUM(CASE WHEN ep.is_missing = 1 THEN 1 ELSE 0 END)        AS episodes_missing
+
                 FROM media_entities me
                 LEFT JOIN episodes ep ON ep.entity_id = me.id
                 WHERE me.media_type = 'show'

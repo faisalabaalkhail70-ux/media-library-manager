@@ -1,12 +1,35 @@
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
 
+_GREEN  = QColor("#81c784")
+_YELLOW = QColor("#fff176")
+_RED    = QColor("#ef9a9a")
+_MUTED  = QColor("#9e9e9e")
+
 
 class ShowsTableModel(QAbstractTableModel):
     HEADERS = [
-        "Title", "Year", "Seasons",
-        "Have", "Missing", "Completion %", "Rating", "Genres",
+        "Title",
+        "Year",
+        "Seasons Have",
+        "Seasons Missing",
+        "Episodes Have",
+        "Episodes Missing",
+        "Completion %",
+        "Rating",
+        "Genres",
     ]
+
+    # Column indices — keep in sync with HEADERS
+    _COL_TITLE    = 0
+    _COL_YEAR     = 1
+    _COL_S_HAVE   = 2
+    _COL_S_MISS   = 3
+    _COL_E_HAVE   = 4
+    _COL_E_MISS   = 5
+    _COL_PCT      = 6
+    _COL_RATING   = 7
+    _COL_GENRES   = 8
 
     def __init__(self, rows: list[dict] | None = None) -> None:
         super().__init__()
@@ -35,32 +58,46 @@ class ShowsTableModel(QAbstractTableModel):
         if not index.isValid():
             return None
 
-        row  = self._rows[index.row()]
-        col  = index.column()
-        have = row.get("episodes_have") or 0
-        total = row.get("episodes_total") or 0
-        missing = row.get("episodes_missing") or 0
-        pct  = round(have / total * 100) if total > 0 else 0
+        row = self._rows[index.row()]
+        col = index.column()
+
+        ep_have    = row.get("episodes_have")    or 0
+        ep_miss    = row.get("episodes_missing") or 0
+        s_have     = row.get("seasons_have")     or 0
+        s_miss     = row.get("seasons_missing")  or 0
+        ep_total   = ep_have + ep_miss
+        pct        = round(ep_have / ep_total * 100) if ep_total > 0 else 0
 
         if role == Qt.DisplayRole:
-            values = [
+            return [
                 row.get("title", ""),
                 str(row.get("release_year", "") or ""),
-                str(row.get("seasons_count", "") or ""),
-                str(have),
-                str(missing),
+                str(s_have)  if s_have  else "—",
+                str(s_miss)  if s_miss  else "—",
+                str(ep_have) if ep_have else "—",
+                str(ep_miss) if ep_miss else "—",
                 f"{pct}%",
                 str(row.get("rating", "") or ""),
                 row.get("genres", "") or "",
-            ]
-            return values[col]
+            ][col]
 
-        if role == Qt.ForegroundRole and col == 5:
-            if pct == 100:
-                return QColor("#81c784")
-            if pct >= 75:
-                return QColor("#fff176")
-            return QColor("#ef9a9a")
+        if role == Qt.ForegroundRole:
+            # Seasons Missing  → red if any, muted if zero
+            if col == self._COL_S_MISS:
+                return _RED if s_miss > 0 else _MUTED
+            # Episodes Missing → red if any, muted if zero
+            if col == self._COL_E_MISS:
+                return _RED if ep_miss > 0 else _MUTED
+            # Seasons Have / Episodes Have → green
+            if col in (self._COL_S_HAVE, self._COL_E_HAVE):
+                return _GREEN if ep_have > 0 else _MUTED
+            # Completion % → traffic-light
+            if col == self._COL_PCT:
+                if pct == 100:
+                    return _GREEN
+                if pct >= 75:
+                    return _YELLOW
+                return _RED
 
         if role == Qt.UserRole:
             return row.get("entity_id")
