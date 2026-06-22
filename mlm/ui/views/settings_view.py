@@ -1,16 +1,169 @@
+from __future__ import annotations
+
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QFormLayout,
     QLineEdit, QPushButton, QGroupBox, QMessageBox,
-    QComboBox, QApplication
+    QComboBox, QApplication, QHBoxLayout, QProgressBar,
+    QTextEdit, QDialog, QDialogButtonBox, QScrollArea
 )
 from mlm.db.repositories.settings_repo import SettingsRepository
 from mlm.ui.styles import get_stylesheet
+from mlm.__version__ import VERSION
 
+
+# ──────────────────────────────────────────────────────────────────────────────────
+# Background workers
+# ──────────────────────────────────────────────────────────────────────────────────
+
+class _CheckWorker(QThread):
+    """Runs check_for_update() off the UI thread."""
+    update_found    = Signal(dict)   # emits release metadata
+    up_to_date      = Signal()
+    check_failed    = Signal(str)    # emits error message
+
+    def run(self) -> None:
+        try:
+            from mlm.services.updater_service import check_for_update
+            result = check_for_update()
+            if result:
+                self.update_found.emit(result)
+            else:
+                self.up_to_date.emit()
+        except Exception as exc:  # noqa: BLE001
+            self.check_failed.emit(str(exc))
+
+
+class _DownloadWorker(QThread):
+    """Streams the zip and extracts it, reporting progress."""
+    progress    = Signal(int, int)   # bytes_done, total_bytes
+    finished_ok = Signal()
+    failed      = Signal(str)
+
+    def __init__(self, zip_url: str) -> None:
+        super().__init__()
+        self._zip_url = zip_url
+
+    def run(self) -> None:
+        try:
+            from mlm.services.updater_service import download_and_install
+            download_and_install(self._zip_url, progress_cb=self.progress.emit)
+            self.finished_ok.emit()
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+
+
+# ──────────────────────────────────────────────────────────────────────────────────
+# "Update available" dialog
+# ──────────────────────────────────────────────────────────────────────────────────
+
+class _UpdateDialog(QDialog):
+    """Shows release notes and offers Download & Install or Skip."""
+
+    def __init__(self, release: dict, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Update Available — {release['name']}")
+        self.setMinimumWidth(520)
+        self._release   = release
+        self._worker: _DownloadWorker | None = None
+
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+
+        # Header
+        hdr = QLabel(f"🎉  Version <b>{release['tag']}</b> is available!")
+        hdr.setStyleSheet("font-size: 14px; color: #81c784; padding: 4px 0;")
+        lay.addWidget(hdr)
+
+        cur_lbl = QLabel(f"Your current version: <b>{VERSION}</b>")
+        cur_lbl.setStyleSheet("color: #9e9e9e; font-size: 12px;")
+        lay.addWidget(cur_lbl)
+
+        # Release notes
+        notes_lbl = QLabel("Release notes:")
+        notes_lbl.setStyleSheet("font-weight: bold; margin-top: 6px;")
+        lay.addWidget(notes_lbl)
+
+        notes = QTextEdit()
+        notes.setReadOnly(True)
+        notes.setPlainText(release["body"])
+        notes.setFixedHeight(160)
+        lay.addWidget(notes)
+
+        # Progress bar (hidden until download starts)
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setVisible(False)
+        lay.addWidget(self._progress)
+
+        self._status = QLabel("")
+        self._status.setObjectName("muted")
+        lay.addWidget(self._status)
+
+        # Buttons
+        self._install_btn = QPushButton("⬇️  Download & Install")
+        self._install_btn.setObjectName("primary")
+        self._install_btn.clicked.connect(self._start_download)
+
+        skip_btn = QPushButton("Skip this version")
+        skip_btn.clicked.connect(self.reject)
+
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self._install_btn)
+        btn_row.addWidget(skip_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+    def _start_download(self) -> None:
+        self._install_btn.setEnabled(False)
+        self._progress.setVisible(True)
+        self._status.setText("Downloading update…")
+
+        self._worker = _DownloadWorker(self._release["zip_url"])
+        self._worker.progress.connect(self._on_progress)
+        self._worker.finished_ok.connect(self._on_done)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.start()
+
+    def _on_progress(self, done: int, total: int) -> None:
+        if total > 0:
+            self._progress.setRange(0, 100)
+            self._progress.setValue(int(done / total * 100))
+        else:
+            # Unknown total length — show indeterminate pulse
+            self._progress.setRange(0, 0)
+        mb = done / (1024 * 1024)
+        self._status.setText(f"Downloading… {mb:.1f} MB")
+
+    def _on_done(self) -> None:
+        self._progress.setValue(100)
+        self._status.setText("")
+        reply = QMessageBox.information(
+            self,
+            "Update Installed",
+            "Update downloaded and installed successfully!\n\n"
+            "Please restart the application for changes to take effect.",
+            QMessageBox.Ok,
+        )
+        self.accept()
+
+    def _on_failed(self, msg: str) -> None:
+        self._install_btn.setEnabled(True)
+        self._progress.setVisible(False)
+        self._status.setText(f"Error: {msg}")
+        QMessageBox.critical(self, "Download Failed", f"Could not download update:\n{msg}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────────
+# Main settings view
+# ──────────────────────────────────────────────────────────────────────────────────
 
 class SettingsView(QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.settings = SettingsRepository()
+        self._check_worker: _CheckWorker | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -20,7 +173,7 @@ class SettingsView(QWidget):
         title.setObjectName("h1")
         layout.addWidget(title)
 
-        # ── API / Integration ──────────────────────────────────────────
+        # ── API / Integration
         api_group = QGroupBox("API & Integration")
         api_form = QFormLayout(api_group)
 
@@ -48,7 +201,7 @@ class SettingsView(QWidget):
         api_form.addRow("Rename Template:", self.rename_template)
         layout.addWidget(api_group)
 
-        # ── Appearance ────────────────────────────────────────────────
+        # ── Appearance
         appear_group = QGroupBox("Appearance")
         appear_form = QFormLayout(appear_group)
 
@@ -62,7 +215,35 @@ class SettingsView(QWidget):
         appear_form.addRow("Row Density:", self.density_combo)
         layout.addWidget(appear_group)
 
-        # ── Save ────────────────────────────────────────────────────────
+        # ── Updates
+        update_group = QGroupBox("Application Updates")
+        update_layout = QVBoxLayout(update_group)
+        update_layout.setSpacing(8)
+
+        ver_row = QHBoxLayout()
+        ver_row.addWidget(QLabel("Current version:"))
+        ver_lbl = QLabel(f"<b>{VERSION}</b>")
+        ver_lbl.setStyleSheet("color: #81c784;")
+        ver_row.addWidget(ver_lbl)
+        ver_row.addStretch()
+        update_layout.addLayout(ver_row)
+
+        btn_row = QHBoxLayout()
+        self._check_btn = QPushButton("🔄  Check for Updates")
+        self._check_btn.setObjectName("primary")
+        self._check_btn.setFixedWidth(200)
+        self._check_btn.clicked.connect(self._check_updates)
+        btn_row.addWidget(self._check_btn)
+
+        self._update_status = QLabel("")
+        self._update_status.setObjectName("muted")
+        btn_row.addWidget(self._update_status)
+        btn_row.addStretch()
+        update_layout.addLayout(btn_row)
+
+        layout.addWidget(update_group)
+
+        # ── Save
         self.save_btn = QPushButton("Save Settings")
         self.save_btn.setObjectName("primary")
         self.save_btn.clicked.connect(self.save_settings)
@@ -70,6 +251,43 @@ class SettingsView(QWidget):
 
         layout.addStretch()
         self._load_settings()
+
+    # ── Update logic ──────────────────────────────────────────────────────────────────────
+
+    def _check_updates(self) -> None:
+        if self._check_worker and self._check_worker.isRunning():
+            return
+        self._check_btn.setEnabled(False)
+        self._update_status.setText("Checking…")
+        self._update_status.setStyleSheet("color: #9e9e9e;")
+
+        self._check_worker = _CheckWorker()
+        self._check_worker.update_found.connect(self._on_update_found)
+        self._check_worker.up_to_date.connect(self._on_up_to_date)
+        self._check_worker.check_failed.connect(self._on_check_failed)
+        self._check_worker.finished.connect(lambda: self._check_btn.setEnabled(True))
+        self._check_worker.start()
+
+    def _on_update_found(self, release: dict) -> None:
+        self._update_status.setText(
+            f"⬆️  {release['tag']} available"
+        )
+        self._update_status.setStyleSheet("color: #81c784; font-weight: bold;")
+        dlg = _UpdateDialog(release, parent=self)
+        dlg.exec()
+        # After install, re-read version label (user may have restarted manually)
+        self._update_status.setText("Restart the app to apply the update.")
+        self._update_status.setStyleSheet("color: #fff176;")
+
+    def _on_up_to_date(self) -> None:
+        self._update_status.setText("✅  You’re up to date!")
+        self._update_status.setStyleSheet("color: #81c784;")
+
+    def _on_check_failed(self, msg: str) -> None:
+        self._update_status.setText(f"❌  Check failed: {msg}")
+        self._update_status.setStyleSheet("color: #ef9a9a;")
+
+    # ── Settings logic ───────────────────────────────────────────────────────────────────
 
     def _load_settings(self) -> None:
         self.tmdb_key.setText(self.settings.get("tmdb_api_key", ""))
@@ -104,7 +322,6 @@ class SettingsView(QWidget):
         QMessageBox.information(self, "Saved", "Settings saved. Theme and density applied immediately.")
 
     def _apply_density(self, density: str) -> None:
-        """Walk every QTableView/QTableWidget in the app and update row height."""
         from PySide6.QtWidgets import QTableView, QTableWidget
         row_height = 20 if density == "compact" else 28
         for widget in QApplication.instance().allWidgets():
