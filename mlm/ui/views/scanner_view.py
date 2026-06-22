@@ -120,14 +120,12 @@ class ScannerView(QWidget):
     # ── Helpers ───────────────────────────────────────────────
 
     def _get_exclusions(self) -> tuple[set[str], set[str]]:
-        """Return (name_exclusions, path_exclusions) parsed from the text box."""
         names: set[str] = set()
         paths: set[str] = set()
         for ln in self.excl_edit.toPlainText().splitlines():
             ln = ln.strip()
             if not ln:
                 continue
-            # Full paths contain a separator; plain names do not
             from pathlib import Path as _Path
             if _Path(ln).is_absolute() or ("/" in ln or "\\" in ln):
                 paths.add(ln)
@@ -139,7 +137,6 @@ class ScannerView(QWidget):
         self.excl_edit.setPlainText("\n".join(sorted(DEFAULT_EXCLUDED_FOLDERS)))
 
     def _browse_excluded_folder(self) -> None:
-        """Let the user pick a specific folder and add its full path to the exclusion list."""
         path = QFileDialog.getExistingDirectory(self, "Select folder to exclude")
         if not path:
             return
@@ -183,23 +180,51 @@ class ScannerView(QWidget):
         if reply != QMessageBox.Yes:
             return
 
-        # Cascade: remove all media_files for this directory, then the directory itself
         with get_connection() as conn:
-            # Unlink entities that only had files from this directory
+            # Step 1 — collect IDs of all files in this directory
+            file_ids = [
+                r[0] for r in conn.execute(
+                    "SELECT id FROM media_files WHERE directory_id = ?", (dir_id,)
+                ).fetchall()
+            ]
+
+            if file_ids:
+                ph = ",".join("?" * len(file_ids))
+
+                # Step 2 — null episode FK (keep episode rows, mark missing)
+                conn.execute(
+                    f"UPDATE episodes SET media_file_id = NULL, is_missing = 1 "
+                    f"WHERE media_file_id IN ({ph})",
+                    file_ids,
+                )
+
+                # Step 3 — remove duplicate_items referencing these files
+                conn.execute(
+                    f"DELETE FROM duplicate_items WHERE media_file_id IN ({ph})",
+                    file_ids,
+                )
+
+                # Step 4 — null action_ledger FK (preserve history)
+                conn.execute(
+                    f"UPDATE action_ledger SET media_file_id = NULL "
+                    f"WHERE media_file_id IN ({ph})",
+                    file_ids,
+                )
+
+            # Step 5 — now safe to delete media_files
+            conn.execute(
+                "DELETE FROM media_files WHERE directory_id = ?", (dir_id,)
+            )
+
+            # Step 6 — clean up orphan duplicate_groups
             conn.execute(
                 """
-                UPDATE media_files
-                SET entity_id = NULL
-                WHERE directory_id = ?
-                """,
-                (dir_id,),
+                DELETE FROM duplicate_groups
+                WHERE id NOT IN (SELECT DISTINCT group_id FROM duplicate_items)
+                """
             )
-            # Hard-delete the file records
-            conn.execute(
-                "DELETE FROM media_files WHERE directory_id = ?",
-                (dir_id,),
-            )
-            # Remove orphan entities (no remaining files)
+
+            # Step 7 — clean up orphan media_entities
             conn.execute(
                 """
                 DELETE FROM media_entities
@@ -209,13 +234,15 @@ class ScannerView(QWidget):
                 )
                 """
             )
-            # Remove the directory registration
+
+            # Step 8 — delete scan_runs (FK → directories), then the directory
+            conn.execute("DELETE FROM scan_runs WHERE directory_id = ?", (dir_id,))
             conn.execute("DELETE FROM directories WHERE id = ?", (dir_id,))
 
         self._refresh_dirs_list()
         self.status_label.setText(f"Removed: {path}")
 
-        # Notify other views to refresh
+        # Notify all views to refresh
         from PySide6.QtWidgets import QApplication
         main_win = QApplication.instance().activeWindow()
         if main_win and hasattr(main_win, "stack"):
