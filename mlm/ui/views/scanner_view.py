@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt
 from mlm.app.config import AppConfig
 from mlm.db.repositories.directories_repo import DirectoriesRepository
 from mlm.workers.scan_worker import ScanWorker, DEFAULT_EXCLUDED_FOLDERS
+from mlm.db.connection import get_connection
 
 
 class ScannerView(QWidget):
@@ -25,7 +26,7 @@ class ScannerView(QWidget):
         title.setObjectName("h1")
         layout.addWidget(title)
 
-        # ── Add Directory ─────────────────────────────────────────────────
+        # ── Add Directory ────────────────────────────────────────────────
         add_group = QGroupBox("Add Directory")
         add_layout = QVBoxLayout(add_group)
 
@@ -52,7 +53,7 @@ class ScannerView(QWidget):
 
         layout.addWidget(add_group)
 
-        # ── Registered Directories ──────────────────────────────────────
+        # ── Registered Directories ───────────────────────────────────────
         dirs_group = QGroupBox("Registered Directories")
         dirs_layout = QVBoxLayout(dirs_group)
 
@@ -72,14 +73,13 @@ class ScannerView(QWidget):
 
         layout.addWidget(dirs_group)
 
-        # ── Excluded Folder Names ────────────────────────────────────────
+        # ── Excluded Folder Names ───────────────────────────────────────
         excl_group = QGroupBox("Excluded Folder Names")
         excl_layout = QVBoxLayout(excl_group)
 
         excl_note = QLabel(
-            "Folders with these names will be skipped during scan "
-            "(case-insensitive, one per line)."
-            "\nYou can also exclude a specific subfolder path using the browser below."
+            "Folder names to skip during scan (case-insensitive, one per line).\n"
+            "Use \"Exclude a Specific Folder\" to skip a full path."
         )
         excl_note.setObjectName("muted")
         excl_note.setWordWrap(True)
@@ -94,7 +94,6 @@ class ScannerView(QWidget):
         reset_excl_btn = QPushButton("Reset to Defaults")
         reset_excl_btn.clicked.connect(self._reset_exclusions)
 
-        # NEW: browse a specific folder to exclude
         browse_excl_btn = QPushButton("Exclude a Specific Folder…")
         browse_excl_btn.clicked.connect(self._browse_excluded_folder)
 
@@ -118,26 +117,36 @@ class ScannerView(QWidget):
         layout.addStretch()
         self._refresh_dirs_list()
 
-    # ── Helpers ────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────
 
-    def _get_exclusions(self) -> set[str]:
-        lines = self.excl_edit.toPlainText().splitlines()
-        return {ln.strip().lower() for ln in lines if ln.strip()}
+    def _get_exclusions(self) -> tuple[set[str], set[str]]:
+        """Return (name_exclusions, path_exclusions) parsed from the text box."""
+        names: set[str] = set()
+        paths: set[str] = set()
+        for ln in self.excl_edit.toPlainText().splitlines():
+            ln = ln.strip()
+            if not ln:
+                continue
+            # Full paths contain a separator; plain names do not
+            from pathlib import Path as _Path
+            if _Path(ln).is_absolute() or ("/" in ln or "\\" in ln):
+                paths.add(ln)
+            else:
+                names.add(ln.lower())
+        return names, paths
 
     def _reset_exclusions(self) -> None:
         self.excl_edit.setPlainText("\n".join(sorted(DEFAULT_EXCLUDED_FOLDERS)))
 
     def _browse_excluded_folder(self) -> None:
-        """Let the user pick any folder and append its full path to the exclusions list."""
+        """Let the user pick a specific folder and add its full path to the exclusion list."""
         path = QFileDialog.getExistingDirectory(self, "Select folder to exclude")
         if not path:
             return
-        existing = self.excl_edit.toPlainText().strip()
-        # Append only if not already listed
-        if path.lower() not in [ln.lower() for ln in existing.splitlines()]:
-            self.excl_edit.setPlainText(
-                (existing + "\n" + path).strip()
-            )
+        existing_lines = [ln.strip() for ln in self.excl_edit.toPlainText().splitlines()]
+        if path not in existing_lines:
+            existing_lines.append(path)
+            self.excl_edit.setPlainText("\n".join(filter(None, existing_lines)))
 
     def _refresh_dirs_list(self) -> None:
         self.dirs_list.clear()
@@ -146,11 +155,11 @@ class ScannerView(QWidget):
             item = QListWidgetItem(
                 f'[{d["library_type"]}]  {d["path"]}  — last scan: {last}'
             )
-            item.setData(Qt.UserRole, d["id"])
+            item.setData(Qt.UserRole,     d["id"])
             item.setData(Qt.UserRole + 1, d["path"])
             self.dirs_list.addItem(item)
 
-    # ── Actions ────────────────────────────────────────────────
+    # ── Actions ───────────────────────────────────────────────
 
     def browse_directory(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select media root")
@@ -166,13 +175,55 @@ class ScannerView(QWidget):
         path   = item.data(Qt.UserRole + 1)
         reply  = QMessageBox.question(
             self, "Remove Directory",
-            f"Remove '{path}' from the library?\n\nFiles will NOT be deleted from disk.",
+            f"Remove '{path}' from the library?\n\n"
+            "All scanned file records for this directory will be removed from the database.\n"
+            "Files on disk will NOT be deleted.",
             QMessageBox.Yes | QMessageBox.No,
         )
-        if reply == QMessageBox.Yes:
-            self.directories_repo.remove_directory(dir_id)
-            self._refresh_dirs_list()
-            self.status_label.setText(f"Removed: {path}")
+        if reply != QMessageBox.Yes:
+            return
+
+        # Cascade: remove all media_files for this directory, then the directory itself
+        with get_connection() as conn:
+            # Unlink entities that only had files from this directory
+            conn.execute(
+                """
+                UPDATE media_files
+                SET entity_id = NULL
+                WHERE directory_id = ?
+                """,
+                (dir_id,),
+            )
+            # Hard-delete the file records
+            conn.execute(
+                "DELETE FROM media_files WHERE directory_id = ?",
+                (dir_id,),
+            )
+            # Remove orphan entities (no remaining files)
+            conn.execute(
+                """
+                DELETE FROM media_entities
+                WHERE id NOT IN (
+                    SELECT DISTINCT entity_id FROM media_files
+                    WHERE entity_id IS NOT NULL AND removed_at IS NULL
+                )
+                """
+            )
+            # Remove the directory registration
+            conn.execute("DELETE FROM directories WHERE id = ?", (dir_id,))
+
+        self._refresh_dirs_list()
+        self.status_label.setText(f"Removed: {path}")
+
+        # Notify other views to refresh
+        from PySide6.QtWidgets import QApplication
+        main_win = QApplication.instance().activeWindow()
+        if main_win and hasattr(main_win, "stack"):
+            stack = main_win.stack
+            for i in range(stack.count()):
+                w = stack.widget(i)
+                if hasattr(w, "load_rows"):
+                    w.load_rows()
 
     def rescan_selected(self) -> None:
         item = self.dirs_list.currentItem()
@@ -209,11 +260,13 @@ class ScannerView(QWidget):
         self._start_scan(match["id"], path)
 
     def _start_scan(self, directory_id: int, path: str) -> None:
+        name_excl, path_excl = self._get_exclusions()
         self.worker = ScanWorker(
             directory_id=directory_id,
             root_path=path,
             valid_exts=self.config.supported_video_exts,
-            excluded_folders=self._get_exclusions(),
+            excluded_folders=name_excl,
+            excluded_paths=path_excl,
         )
         self.worker.progress.connect(self.on_progress)
         self.worker.finished_scan.connect(self.on_finished)

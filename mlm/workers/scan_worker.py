@@ -21,9 +21,9 @@ DEFAULT_EXCLUDED_FOLDERS: frozenset[str] = frozenset({
 class ScanWorker(QThread):
     """Walk *root_path* recursively and upsert media file records."""
 
-    progress = Signal(int, str)
+    progress      = Signal(int, str)
     finished_scan = Signal(dict)
-    failed = Signal(str)
+    failed        = Signal(str)
 
     def __init__(
         self,
@@ -31,30 +31,41 @@ class ScanWorker(QThread):
         root_path: str,
         valid_exts: tuple[str, ...],
         excluded_folders: frozenset[str] | None = None,
+        excluded_paths: set[str] | None = None,
     ) -> None:
         super().__init__()
-        self.directory_id = directory_id
-        self.root_path = Path(root_path).resolve()
-        self.valid_exts = {e.lower() for e in valid_exts}
+        self.directory_id     = directory_id
+        self.root_path        = Path(root_path).resolve()
+        self.valid_exts       = {e.lower() for e in valid_exts}
         self.excluded_folders = excluded_folders or DEFAULT_EXCLUDED_FOLDERS
-        self._running = True
-        self.scan_service = ScanService()
-        self.files_repo = FilesRepository()
+        # Full resolved paths of folders to skip entirely
+        self.excluded_paths   = {Path(p).resolve() for p in (excluded_paths or set())}
+        self._running         = True
+        self.scan_service     = ScanService()
+        self.files_repo       = FilesRepository()
         self.directories_repo = DirectoriesRepository()
 
     def stop(self) -> None:
-        """Request graceful cancellation."""
         self._running = False
 
     def _is_excluded(self, path: Path) -> bool:
-        """Return True if any ancestor folder is in the exclusion list."""
-        return any(
-            part.lower() in self.excluded_folders
-            for part in path.relative_to(self.root_path).parts[:-1]
-        )
+        """Return True if path is inside an excluded folder name OR an excluded full path."""
+        # 1. Check full-path exclusions (e.g. C:/Movies/Extras specifically selected)
+        for excl in self.excluded_paths:
+            try:
+                path.relative_to(excl)
+                return True   # path is inside this excluded directory
+            except ValueError:
+                pass
+
+        # 2. Check folder-name exclusions (e.g. any folder called "sample")
+        try:
+            rel_parts = path.relative_to(self.root_path).parts[:-1]
+        except ValueError:
+            return False
+        return any(part.lower() in self.excluded_folders for part in rel_parts)
 
     def run(self) -> None:
-        """Main scan loop: discover files, upsert records, flag removals."""
         files_seen = files_added = files_updated = files_removed = 0
         scan_run_id = self.scan_service.begin_scan_run(self.directory_id)
         log.info("Scan started for directory_id=%d path=%s", self.directory_id, self.root_path)
@@ -86,9 +97,9 @@ class ScanWorker(QThread):
                     log.error("Failed to save record for %s: %s", path, exc, exc_info=True)
                     continue
 
-                files_seen += 1
+                files_seen    += 1
                 files_updated += was_known
-                files_added += not was_known
+                files_added   += not was_known
 
                 if files_seen % 10 == 0:
                     self.progress.emit(files_seen, path.name)
@@ -130,8 +141,8 @@ class ScanWorker(QThread):
         log.info("Scan %s — seen=%d added=%d updated=%d removed=%d",
                  status, files_seen, files_added, files_updated, files_removed)
         self.finished_scan.emit({
-            "status": status,
-            "files_seen": files_seen,
-            "files_added": files_added,
+            "status":        status,
+            "files_seen":    files_seen,
+            "files_added":   files_added,
             "files_removed": files_removed,
         })
