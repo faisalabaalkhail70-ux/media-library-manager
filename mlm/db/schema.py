@@ -141,18 +141,38 @@ CREATE TABLE IF NOT EXISTS action_ledger (
     FOREIGN KEY(media_file_id) REFERENCES media_files(id)
 );
 
+-- Collections -----------------------------------------------------------
+CREATE TABLE IF NOT EXISTS collections (
+    id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS collection_items (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection_id INTEGER NOT NULL,
+    entity_id     INTEGER NOT NULL,
+    added_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(collection_id, entity_id),
+    FOREIGN KEY(collection_id) REFERENCES collections(id) ON DELETE CASCADE,
+    FOREIGN KEY(entity_id)     REFERENCES media_entities(id) ON DELETE CASCADE
+);
+
 -- Performance indexes
-CREATE INDEX IF NOT EXISTS idx_files_entity     ON media_files(entity_id);
-CREATE INDEX IF NOT EXISTS idx_files_removed    ON media_files(removed_at);
-CREATE INDEX IF NOT EXISTS idx_files_directory  ON media_files(directory_id);
-CREATE INDEX IF NOT EXISTS idx_files_partial_h  ON media_files(partial_hash);
-CREATE INDEX IF NOT EXISTS idx_files_full_h     ON media_files(full_hash);
-CREATE INDEX IF NOT EXISTS idx_cache_provider   ON api_cache(provider, cache_key);
-CREATE INDEX IF NOT EXISTS idx_episodes_entity  ON episodes(entity_id);
-CREATE INDEX IF NOT EXISTS idx_episodes_missing ON episodes(is_missing);
+CREATE INDEX IF NOT EXISTS idx_files_entity        ON media_files(entity_id);
+CREATE INDEX IF NOT EXISTS idx_files_removed       ON media_files(removed_at);
+CREATE INDEX IF NOT EXISTS idx_files_directory     ON media_files(directory_id);
+CREATE INDEX IF NOT EXISTS idx_files_partial_h     ON media_files(partial_hash);
+CREATE INDEX IF NOT EXISTS idx_files_full_h        ON media_files(full_hash);
+CREATE INDEX IF NOT EXISTS idx_cache_provider      ON api_cache(provider, cache_key);
+CREATE INDEX IF NOT EXISTS idx_episodes_entity     ON episodes(entity_id);
+CREATE INDEX IF NOT EXISTS idx_episodes_missing    ON episodes(is_missing);
+CREATE INDEX IF NOT EXISTS idx_col_items_col       ON collection_items(collection_id);
+CREATE INDEX IF NOT EXISTS idx_col_items_entity    ON collection_items(entity_id);
 """
 
-CURRENT_VERSION = 2
+CURRENT_VERSION = 3
 
 
 def init_database() -> None:

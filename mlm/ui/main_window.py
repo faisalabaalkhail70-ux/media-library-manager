@@ -11,31 +11,36 @@ from PySide6.QtWidgets import (
 from mlm.db.repositories.settings_repo import SettingsRepository
 from mlm.ui.styles import get_stylesheet
 from mlm.ui.global_search import GlobalSearchBar
-from mlm.ui.views.dashboard_view   import DashboardView
-from mlm.ui.views.scanner_view     import ScannerView
-from mlm.ui.views.library_view     import LibraryView
-from mlm.ui.views.movies_view      import MoviesView
-from mlm.ui.views.shows_view       import ShowsView
-from mlm.ui.views.duplicates_view  import DuplicatesView
-from mlm.ui.views.rename_view      import RenameView
-from mlm.ui.views.health_view      import HealthView
-from mlm.ui.views.reports_view     import ReportsView
-from mlm.ui.views.settings_view    import SettingsView
+from mlm.ui.views.dashboard_view    import DashboardView
+from mlm.ui.views.scanner_view      import ScannerView
+from mlm.ui.views.library_view      import LibraryView
+from mlm.ui.views.movies_view       import MoviesView
+from mlm.ui.views.shows_view        import ShowsView
+from mlm.ui.views.collections_view  import CollectionsView
+from mlm.ui.views.duplicates_view   import DuplicatesView
+from mlm.ui.views.rename_view       import RenameView
+from mlm.ui.views.health_view       import HealthView
+from mlm.ui.views.reports_view      import ReportsView
+from mlm.ui.views.settings_view     import SettingsView
 
 log = logging.getLogger(__name__)
 
 NAV_ITEMS = [
-    ("\U0001f3e0  Dashboard",   DashboardView),
-    ("\U0001f4c2  Scanner",     ScannerView),
-    ("\U0001f4da  Library",     LibraryView),
-    ("\U0001f3ac  Movies",      MoviesView),
-    ("\U0001f4fa  TV Shows",    ShowsView),
-    ("\U0001f50d  Duplicates",  DuplicatesView),
-    ("\u270f\ufe0f  Rename",      RenameView),
-    ("\U0001fa7a  Health",      HealthView),
-    ("\U0001f4ca  Reports",     ReportsView),
-    ("\u2699\ufe0f  Settings",    SettingsView),
+    ("\U0001f3e0  Dashboard",    DashboardView),
+    ("\U0001f4c2  Scanner",      ScannerView),
+    ("\U0001f4da  Library",      LibraryView),
+    ("\U0001f3ac  Movies",       MoviesView),
+    ("\U0001f4fa  TV Shows",     ShowsView),
+    ("\U0001f4da  Collections",  CollectionsView),   # ← NEW
+    ("\U0001f50d  Duplicates",   DuplicatesView),
+    ("\u270f\ufe0f  Rename",       RenameView),
+    ("\U0001fa7a  Health",       HealthView),
+    ("\U0001f4ca  Reports",      ReportsView),
+    ("\u2699\ufe0f  Settings",     SettingsView),
 ]
+
+# View indices used by GlobalSearchBar (update after adding Collections)
+_SEARCH_VIEW_INDEX = {"movie": 3, "show": 4, "episode": 4}
 
 
 class MainWindow(QMainWindow):
@@ -61,8 +66,6 @@ class MainWindow(QMainWindow):
         self._alert_banner.setVisible(False)
         outer.addWidget(self._alert_banner)
 
-        # ── Global search bar ─────────────────────────────────────────
-        # Built after stack so we can pass nav_buttons to it
         self.stack = QStackedWidget()
         self.nav_buttons: list[QPushButton] = []
 
@@ -111,7 +114,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(sidebar)
         main_layout.addWidget(self.stack, 1)
 
-        # Now build the search bar (needs stack + nav_buttons)
+        # Search bar (needs stack + nav_buttons fully built)
         self._search_bar = GlobalSearchBar(self.stack, self.nav_buttons)
         self._search_bar.setFixedHeight(44)
         self._search_bar.setStyleSheet(

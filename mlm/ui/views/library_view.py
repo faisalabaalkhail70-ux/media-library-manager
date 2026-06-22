@@ -1,14 +1,10 @@
+"""Library view — browse indexed files + run metadata/probe/health/bulk-rematch actions."""
 from PySide6.QtWidgets import (
-    QFrame,
-    QHBoxLayout,
-    QLabel,
-    QMessageBox,
-    QPushButton,
-    QProgressBar,
-    QTableView,
-    QVBoxLayout,
-    QWidget,
+    QFrame, QHBoxLayout, QLabel, QMessageBox,
+    QPushButton, QProgressBar, QTableView, QVBoxLayout, QWidget,
+    QAbstractItemView
 )
+from PySide6.QtCore import Qt
 
 from mlm.db.repositories.files_repo import FilesRepository
 from mlm.ui.models.media_files_model import MediaFilesTableModel
@@ -30,28 +26,24 @@ class LibraryView(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(14)
 
+        # ── Header ───────────────────────────────────────────────────
         header = QHBoxLayout()
         title_wrap = QVBoxLayout()
         title_wrap.setSpacing(2)
-
         title = QLabel("Library")
         title.setObjectName("h1")
-
         subtitle = QLabel("Browse indexed files and run metadata, probe, and health actions.")
         subtitle.setObjectName("muted")
-
         title_wrap.addWidget(title)
         title_wrap.addWidget(subtitle)
-
         self.refresh_btn = QPushButton("Refresh Library")
         self.refresh_btn.clicked.connect(self.load_rows)
-
         header.addLayout(title_wrap)
         header.addStretch()
         header.addWidget(self.refresh_btn)
-
         root.addLayout(header)
 
+        # ── Library actions panel ───────────────────────────────────────
         ops_panel = QFrame()
         ops_panel.setObjectName("card")
         ops_layout = QVBoxLayout(ops_panel)
@@ -60,29 +52,32 @@ class LibraryView(QWidget):
 
         ops_title = QLabel("Library Actions")
         ops_title.setObjectName("h1")
-
         ops_subtitle = QLabel("Run metadata matching, ffprobe enrichment, and health verification.")
         ops_subtitle.setObjectName("muted")
-
         ops_layout.addWidget(ops_title)
         ops_layout.addWidget(ops_subtitle)
 
         ops_row = QHBoxLayout()
-
         self.match_btn = QPushButton("Auto Match Metadata")
         self.match_btn.clicked.connect(self.run_metadata_match)
-
         self.probe_btn = QPushButton("Run ffprobe Enrich")
         self.probe_btn.clicked.connect(self.run_probe)
-
         self.health_btn = QPushButton("Run Health Scan")
         self.health_btn.clicked.connect(self.run_health_scan)
+
+        # Bulk re-match button (force-re-matches ALL already-matched files)
+        self.rematch_btn = QPushButton("\U0001f504 Bulk Re-Match All")
+        self.rematch_btn.setToolTip(
+            "Force re-fetch metadata from TMDB for every entity in the library, "
+            "overwriting stale data."
+        )
+        self.rematch_btn.clicked.connect(self.run_bulk_rematch)
 
         ops_row.addWidget(self.match_btn)
         ops_row.addWidget(self.probe_btn)
         ops_row.addWidget(self.health_btn)
+        ops_row.addWidget(self.rematch_btn)
         ops_row.addStretch()
-
         ops_layout.addLayout(ops_row)
 
         self.status_label = QLabel("Idle.")
@@ -97,58 +92,53 @@ class LibraryView(QWidget):
 
         root.addWidget(ops_panel)
 
+        # ── Summary row ──────────────────────────────────────────────
         summary_panel = QFrame()
         summary_panel.setObjectName("card")
         summary_layout = QHBoxLayout(summary_panel)
         summary_layout.setContentsMargins(16, 14, 16, 14)
-
         self.count_label = QLabel("0 rows loaded")
         self.count_label.setObjectName("muted")
-
         summary_layout.addWidget(self.count_label)
         summary_layout.addStretch()
-
         root.addWidget(summary_panel)
 
+        # ── Table ───────────────────────────────────────────────────
         table_panel = QFrame()
         table_panel.setObjectName("card")
         table_layout = QVBoxLayout(table_panel)
         table_layout.setContentsMargins(12, 12, 12, 12)
-
         self.table = QTableView()
         self.table.setModel(self.model)
         self.table.setSortingEnabled(False)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QTableView.SelectRows)
-        self.table.setSelectionMode(QTableView.SingleSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.horizontalHeader().setStretchLastSection(True)
-
         table_layout.addWidget(self.table)
         root.addWidget(table_panel, 1)
 
         self.load_rows()
 
-    # ── Data ──────────────────────────────────────────────────────
+    # ── Data ─────────────────────────────────────────────────────
 
     def load_rows(self) -> None:
         rows = self.repo.fetch_library_rows()
         self.model.set_rows(rows)
         self.count_label.setText(f"{len(rows)} rows loaded")
 
-    # ── Actions ───────────────────────────────────────────────────
+    # ── Actions ─────────────────────────────────────────────────
 
     def run_metadata_match(self) -> None:
         if self.metadata_worker and self.metadata_worker.isRunning():
             self.metadata_worker.stop()
             self.status_label.setText("Stopping metadata match...")
             return
-
         self.metadata_worker = MetadataWorker(limit=300)
         self.metadata_worker.progress.connect(self.on_metadata_progress)
         self.metadata_worker.finished_batch.connect(self.on_metadata_finished)
         self.metadata_worker.failed.connect(self.on_worker_failed)
-
         self.progress.show()
         self.progress.setValue(0)
         self.status_label.setText("Matching metadata...")
@@ -159,40 +149,65 @@ class LibraryView(QWidget):
             self.probe_worker.stop()
             self.status_label.setText("Stopping ffprobe enrich...")
             return
-
         self.probe_worker = ProbeWorker(limit=300)
         self.probe_worker.progress.connect(self.on_probe_progress)
         self.probe_worker.finished_batch.connect(self.on_probe_finished)
         self.probe_worker.failed.connect(self.on_worker_failed)
-
         self.progress.show()
         self.progress.setValue(0)
         self.status_label.setText("Running ffprobe enrich...")
         self.probe_worker.start()
 
     def run_health_scan(self) -> None:
-        """Launch health scan on a background thread — never blocks the UI."""
         if self.health_worker and self.health_worker.isRunning():
             self.health_worker.stop()
             self.status_label.setText("Stopping health scan...")
             self.health_btn.setText("Run Health Scan")
             return
-
         self.health_worker = HealthWorker()
         self.health_worker.finished_scan.connect(self.on_health_finished)
         self.health_worker.failed.connect(self.on_worker_failed)
-
         self.progress.show()
-        self.progress.setRange(0, 0)   # indeterminate
+        self.progress.setRange(0, 0)
         self.health_btn.setText("Stop Health Scan")
         self.status_label.setText("Running health scan...")
         self.health_worker.start()
 
-    # ── Slots ─────────────────────────────────────────────────────
+    def run_bulk_rematch(self) -> None:
+        """Force-re-match every entity already in the DB against TMDB."""
+        if self.metadata_worker and self.metadata_worker.isRunning():
+            QMessageBox.information(self, "Busy", "A metadata operation is already running.")
+            return
+        reply = QMessageBox.question(
+            self, "Bulk Re-Match All",
+            "This will re-fetch TMDB metadata for ALL entities and overwrite existing data.\n"
+            "It may take several minutes and use many API calls.\nContinue?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # MetadataWorker with limit=0 means ‘process everything, including already-matched’
+        self.metadata_worker = MetadataWorker(limit=0, force=True)
+        self.metadata_worker.progress.connect(self.on_metadata_progress)
+        self.metadata_worker.finished_batch.connect(self.on_metadata_finished)
+        self.metadata_worker.failed.connect(self.on_worker_failed)
+        self.progress.show()
+        self.progress.setValue(0)
+        self.rematch_btn.setEnabled(False)
+        self.status_label.setText("Bulk re-matching all entities...")
+        self.metadata_worker.start()
+
+        main_win = self.window()
+        if hasattr(main_win, "track_worker"):
+            main_win.track_worker(self.metadata_worker, "Bulk re-matching metadata…")
+
+    # ── Slots ──────────────────────────────────────────────────
 
     def on_metadata_progress(self, current: int, total: int, label: str) -> None:
         percent = int((current / total) * 100) if total else 0
-        self.progress.setValue(percent)
+        self.progress.setRange(0, max(total, 1))
+        self.progress.setValue(current)
         self.status_label.setText(f"Metadata {current}/{total}: {label}")
 
     def on_probe_progress(self, current: int, total: int, label: str) -> None:
@@ -202,6 +217,7 @@ class LibraryView(QWidget):
 
     def on_metadata_finished(self) -> None:
         self.progress.hide()
+        self.rematch_btn.setEnabled(True)
         self.status_label.setText("Metadata matching complete.")
         self.load_rows()
 
@@ -226,5 +242,6 @@ class LibraryView(QWidget):
         self.progress.hide()
         self.progress.setRange(0, 100)
         self.health_btn.setText("Run Health Scan")
+        self.rematch_btn.setEnabled(True)
         self.status_label.setText("Operation failed.")
         QMessageBox.critical(self, "Operation failed", message)
