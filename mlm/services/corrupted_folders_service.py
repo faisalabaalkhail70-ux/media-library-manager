@@ -4,9 +4,9 @@ Returns a list of dicts, one per affected folder, sorted by corrupted_count DESC
 
     [
         {
-            'title':           'Breaking Bad',   # media_entities.title (or filename stem)
-            'media_type':      'show',            # 'movie' | 'show' | None
-            'folder_path':     r'D:\Media\TV Shows\Breaking Bad',
+            'title':           'Breaking Bad',
+            'media_type':      'show',
+            'folder_path':     'D:\\Media\\TV Shows\\Breaking Bad',
             'corrupted_count': 10,
         },
         ...
@@ -45,7 +45,6 @@ class CorruptedFoldersService:
             folder = row["folder_path"] or ""
             title  = row["entity_title"]
             if not title:
-                # Fall back to the last path component
                 title = os.path.basename(folder.rstrip("\\/")) or folder
             result.append({
                 "title":           title,
