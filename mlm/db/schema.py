@@ -159,6 +159,17 @@ CREATE TABLE IF NOT EXISTS collection_items (
     FOREIGN KEY(entity_id)     REFERENCES media_entities(id) ON DELETE CASCADE
 );
 
+-- Watchlist -------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS watchlist (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id  INTEGER NOT NULL UNIQUE,
+    priority   INTEGER NOT NULL DEFAULT 5,   -- 1 (highest) to 10 (lowest)
+    notes      TEXT,
+    added_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    watched_at TEXT,                         -- NULL = not yet watched
+    FOREIGN KEY(entity_id) REFERENCES media_entities(id) ON DELETE CASCADE
+);
+
 -- Performance indexes
 CREATE INDEX IF NOT EXISTS idx_files_entity        ON media_files(entity_id);
 CREATE INDEX IF NOT EXISTS idx_files_removed       ON media_files(removed_at);
@@ -170,9 +181,10 @@ CREATE INDEX IF NOT EXISTS idx_episodes_entity     ON episodes(entity_id);
 CREATE INDEX IF NOT EXISTS idx_episodes_missing    ON episodes(is_missing);
 CREATE INDEX IF NOT EXISTS idx_col_items_col       ON collection_items(collection_id);
 CREATE INDEX IF NOT EXISTS idx_col_items_entity    ON collection_items(entity_id);
+CREATE INDEX IF NOT EXISTS idx_watchlist_entity    ON watchlist(entity_id);
 """
 
-CURRENT_VERSION = 3
+CURRENT_VERSION = 4
 
 
 def init_database() -> None:

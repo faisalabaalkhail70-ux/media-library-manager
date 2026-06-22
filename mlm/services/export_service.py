@@ -1,4 +1,8 @@
+"""Export service — CSV, JSON, Excel, PDF with timestamped filenames."""
+import json
+from datetime import datetime
 from pathlib import Path
+
 import pandas as pd
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
@@ -35,7 +39,18 @@ REPORT_QUERIES: dict[str, str] = {
         JOIN media_files mf      ON mf.id = di.media_file_id
         ORDER BY dg.id, mf.file_name
     """,
+    "watchlist": """
+        SELECT me.title, me.media_type, me.release_year, me.rating,
+               w.priority, w.notes, w.added_at, w.watched_at
+        FROM watchlist w
+        JOIN media_entities me ON me.id = w.entity_id
+        ORDER BY w.priority, me.title
+    """,
 }
+
+
+def _timestamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
 class ExportService:
@@ -46,45 +61,51 @@ class ExportService:
         query = REPORT_QUERIES.get(report_name)
         if not query:
             raise ValueError(f"Unknown report: {report_name}")
-        # كل استدعاء يفتح connection جديدة ويغلقها — لا leak
         with get_connection() as conn:
             return pd.read_sql_query(query, conn)
 
     def export_csv(self, report_name: str) -> str:
         df  = self._query_dataframe(report_name)
-        out = EXPORT_DIR / f"{report_name}.csv"
+        out = EXPORT_DIR / f"{report_name}_{_timestamp()}.csv"
         df.to_csv(out, index=False)
+        return str(out)
+
+    def export_json(self, report_name: str) -> str:
+        """Export as pretty-printed JSON array."""
+        df  = self._query_dataframe(report_name)
+        out = EXPORT_DIR / f"{report_name}_{_timestamp()}.json"
+        out.write_text(
+            json.dumps(df.to_dict(orient="records"), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         return str(out)
 
     def export_excel(self, report_name: str) -> str:
         df  = self._query_dataframe(report_name)
-        out = EXPORT_DIR / f"{report_name}.xlsx"
+        out = EXPORT_DIR / f"{report_name}_{_timestamp()}.xlsx"
         df.to_excel(out, index=False)
         return str(out)
 
     def export_pdf(self, report_name: str) -> str:
         df  = self._query_dataframe(report_name)
-        out = EXPORT_DIR / f"{report_name}.pdf"
+        out = EXPORT_DIR / f"{report_name}_{_timestamp()}.pdf"
 
         c = canvas.Canvas(str(out), pagesize=A4)
         width, height = A4
         y = height - 50
 
-        # ── Title ─────────────────────────────────────────────────
         c.setFont("Helvetica-Bold", 14)
-        c.drawString(40, y, f"Media Library Manager — {report_name.replace('_', ' ').title()}")
+        c.drawString(40, y, f"Media Library Manager \u2014 {report_name.replace('_', ' ').title()}")
         y -= 10
         c.setStrokeColorRGB(0.2, 0.2, 0.2)
         c.line(40, y, width - 40, y)
         y -= 20
 
-        # ── Column headers ────────────────────────────────────────
         c.setFont("Helvetica-Bold", 8)
         headers = " | ".join(str(h)[:18] for h in df.columns.tolist())
         c.drawString(40, y, headers[:160])
         y -= 14
 
-        # ── Rows ──────────────────────────────────────────────────
         c.setFont("Helvetica", 8)
         for _, row in df.iterrows():
             line = " | ".join(str(v)[:18] for v in row.tolist())

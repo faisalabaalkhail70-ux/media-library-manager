@@ -17,6 +17,7 @@ from mlm.ui.views.library_view      import LibraryView
 from mlm.ui.views.movies_view       import MoviesView
 from mlm.ui.views.shows_view        import ShowsView
 from mlm.ui.views.collections_view  import CollectionsView
+from mlm.ui.views.watchlist_view    import WatchlistView
 from mlm.ui.views.duplicates_view   import DuplicatesView
 from mlm.ui.views.rename_view       import RenameView
 from mlm.ui.views.health_view       import HealthView
@@ -26,21 +27,19 @@ from mlm.ui.views.settings_view     import SettingsView
 log = logging.getLogger(__name__)
 
 NAV_ITEMS = [
-    ("\U0001f3e0  Dashboard",    DashboardView),
-    ("\U0001f4c2  Scanner",      ScannerView),
-    ("\U0001f4da  Library",      LibraryView),
-    ("\U0001f3ac  Movies",       MoviesView),
-    ("\U0001f4fa  TV Shows",     ShowsView),
-    ("\U0001f4da  Collections",  CollectionsView),   # ← NEW
-    ("\U0001f50d  Duplicates",   DuplicatesView),
-    ("\u270f\ufe0f  Rename",       RenameView),
-    ("\U0001fa7a  Health",       HealthView),
-    ("\U0001f4ca  Reports",      ReportsView),
-    ("\u2699\ufe0f  Settings",     SettingsView),
+    ("\U0001f3e0  Dashboard",    DashboardView),     # 0
+    ("\U0001f4c2  Scanner",      ScannerView),       # 1
+    ("\U0001f4da  Library",      LibraryView),       # 2
+    ("\U0001f3ac  Movies",       MoviesView),        # 3
+    ("\U0001f4fa  TV Shows",     ShowsView),         # 4
+    ("\U0001f4da  Collections",  CollectionsView),   # 5
+    ("\U0001f4cb  Watchlist",    WatchlistView),     # 6  ← NEW
+    ("\U0001f50d  Duplicates",   DuplicatesView),    # 7
+    ("\u270f\ufe0f  Rename",       RenameView),        # 8
+    ("\U0001fa7a  Health",       HealthView),        # 9
+    ("\U0001f4ca  Reports",      ReportsView),       # 10
+    ("\u2699\ufe0f  Settings",     SettingsView),      # 11
 ]
-
-# View indices used by GlobalSearchBar (update after adding Collections)
-_SEARCH_VIEW_INDEX = {"movie": 3, "show": 4, "episode": 4}
 
 
 class MainWindow(QMainWindow):
@@ -114,7 +113,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(sidebar)
         main_layout.addWidget(self.stack, 1)
 
-        # Search bar (needs stack + nav_buttons fully built)
+        # Search bar
         self._search_bar = GlobalSearchBar(self.stack, self.nav_buttons)
         self._search_bar.setFixedHeight(44)
         self._search_bar.setStyleSheet(
@@ -124,7 +123,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._search_bar)
         outer.addWidget(main_area, 1)
 
-        # ── Global activity bar ─────────────────────────────────────────
+        # ── Activity bar ───────────────────────────────────────────────
         activity_bar = QFrame()
         activity_bar.setObjectName("activity_bar")
         activity_bar.setFixedHeight(32)
@@ -164,8 +163,6 @@ class MainWindow(QMainWindow):
         self._check_startup_health()
         self.switch_view(0)
 
-    # ── Startup health check ─────────────────────────────────────────
-
     def _check_startup_health(self) -> None:
         try:
             from mlm.db.connection import get_connection
@@ -183,8 +180,6 @@ class MainWindow(QMainWindow):
                 self._alert_banner.mousePressEvent = lambda _: self._alert_banner.setVisible(False)
         except Exception as exc:
             log.warning("Startup health check failed: %s", exc)
-
-    # ── Public API ──────────────────────────────────────────────
 
     def track_worker(self, worker: QThread, task_label: str = "Working…") -> None:
         self._active_workers += 1
@@ -209,8 +204,6 @@ class MainWindow(QMainWindow):
     def set_status(self, message: str) -> None:
         self._activity_label.setText(message)
 
-    # ── Private slots ───────────────────────────────────────────
-
     def _on_worker_progress(self, done: int, total: int) -> None:
         if total > 0:
             self._progress_bar.setRange(0, total)
@@ -223,8 +216,6 @@ class MainWindow(QMainWindow):
             self._progress_bar.setRange(0, 100)
             self._progress_bar.setValue(0)
             self._activity_label.setText("Ready")
-
-    # ── Navigation ──────────────────────────────────────────────
 
     def switch_view(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
