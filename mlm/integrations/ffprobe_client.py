@@ -10,16 +10,24 @@ log = logging.getLogger(__name__)
 class FFprobeClient:
     """Run ffprobe on a media file and parse its JSON output."""
 
+    DEFAULT_TIMEOUT = 30  # seconds before ffprobe is killed
+
     def __init__(self, ffprobe_path: str = "ffprobe") -> None:
         self.ffprobe_path = ffprobe_path
 
-    def probe(self, file_path: str) -> dict:
+    def probe(self, file_path: str, timeout: int = DEFAULT_TIMEOUT) -> dict:
         """Return the raw ffprobe JSON payload for *file_path*.
+
+        Uses ``subprocess.Popen`` + ``communicate(timeout=)`` instead of
+        ``subprocess.run`` so the caller thread is never blocked indefinitely
+        — ffprobe is killed and a ``RuntimeError`` is raised if it exceeds
+        *timeout* seconds.
 
         Raises:
             FileNotFoundError: if ffprobe binary is not on PATH.
             subprocess.CalledProcessError: if ffprobe exits with non-zero status.
             ValueError: if the file does not exist.
+            RuntimeError: if ffprobe does not finish within *timeout* seconds.
         """
         if not Path(file_path).exists():
             raise ValueError(f"File not found: {file_path}")
@@ -33,15 +41,26 @@ class FFprobeClient:
             file_path,
         ]
         log.debug("ffprobe probing: %s", file_path)
-        completed = subprocess.run(
+
+        with subprocess.Popen(
             cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            encoding="utf-8",      # fix: force UTF-8 instead of system cp1252
-            errors="replace",      # fix: replace unmappable bytes instead of crashing
-        )
-        return json.loads(completed.stdout or "{}")
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",   # force UTF-8 instead of system cp1252
+            errors="replace",   # replace unmappable bytes instead of crashing
+        ) as proc:
+            try:
+                stdout, _ = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()  # drain pipes to avoid ResourceWarning
+                raise RuntimeError(
+                    f"ffprobe timed out after {timeout}s on: {file_path}"
+                )
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(proc.returncode, cmd)
+
+        return json.loads(stdout or "{}")
 
     @staticmethod
     def extract_summary(payload: dict) -> dict:
