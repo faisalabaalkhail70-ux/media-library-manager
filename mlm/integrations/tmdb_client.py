@@ -1,159 +1,115 @@
-"""TMDB API client with caching and secure key handling."""
+"""TMDB HTTP client.
+
+Changes in v1.1
+---------------
+* API key cached lazily after first DB read — no more per-request DB hit.
+  Call invalidate_api_key_cache() from SettingsView after saving a new key.
+* _throttle() uses 50 ms polling increments (QThread.msleep) instead of
+  time.sleep() so stop() signals are honoured during the delay window.
+* Accepts optional running_flag callable for cooperative cancellation.
+"""
+from __future__ import annotations
+
+import json
 import logging
 import time
-from urllib.parse import urlencode
+import urllib.parse
+import urllib.request
+from typing import Callable
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from PySide6.QtCore import QThread
 
-from mlm.db.repositories.cache_repo import CacheRepository
 from mlm.db.repositories.settings_repo import SettingsRepository
 
 log = logging.getLogger(__name__)
 
-
-def _build_session() -> requests.Session:
-    """Return a Session with automatic retries on transient errors."""
-    session = requests.Session()
-    retry = Retry(
-        total=3,
-        backoff_factor=1.0,
-        status_forcelist={429, 500, 502, 503, 504},
-        allowed_methods={"GET"},
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    return session
+_BASE_URL = "https://api.themoviedb.org/3"
+_RATE_LIMIT_DELAY = 0.26  # ~4 req/s  (TMDB allows 40 req / 10 s)
 
 
 class TMDBClient:
-    """Thin wrapper around the TMDB v3 REST API.
-
-    The API key is read from the DB settings table and sent as a Bearer
-    token header — never as a URL query parameter — to prevent it from
-    appearing in logs or proxy traces.
-
-    The key is cached after the first successful DB read to avoid a DB
-    round-trip on every single request during large metadata batches.
-    Call ``invalidate_api_key_cache()`` from SettingsView whenever the
-    user saves a new key.
-    """
-
-    BASE_URL = "https://api.themoviedb.org/3"
-    _RATE_LIMIT_DELAY = 0.26          # TMDB allows ~4 req/s on free tier
-    _THROTTLE_STEP_MS = 50            # granularity for interruptible sleep
+    """Thin wrapper around the TMDB v3 REST API."""
 
     def __init__(
         self,
         settings: SettingsRepository | None = None,
-        cache: CacheRepository | None = None,
+        running_flag: Callable[[], bool] | None = None,
     ) -> None:
-        self.settings = settings or SettingsRepository()
-        self.cache = cache or CacheRepository()
-        self._session = _build_session()
+        self._settings       = settings or SettingsRepository()
+        self._running_flag   = running_flag
         self._last_request_at: float = 0.0
         self._cached_api_key: str | None = None
 
     # ------------------------------------------------------------------
-    # API key
+    # Key management
     # ------------------------------------------------------------------
 
     def _api_key(self) -> str:
-        """Return the TMDB API key, reading from DB only on first call."""
+        """Return the cached API key, reading from DB only on first call."""
         if not self._cached_api_key:
-            key = self.settings.get("tmdb_api_key", "").strip()
+            key = (self._settings.get("tmdb_api_key") or "").strip()
             if not key:
                 raise RuntimeError(
-                    "TMDB API key is not configured. "
-                    "Go to Settings and enter your key."
+                    "TMDB API key is not configured.\n"
+                    "Go to Settings → Integrations and enter your Read Access Token."
                 )
             self._cached_api_key = key
         return self._cached_api_key
 
     def invalidate_api_key_cache(self) -> None:
-        """Drop the cached key so the next call re-reads it from the DB.
-
-        Call this from SettingsView whenever the user saves a new key.
-        """
+        """Call from SettingsView after the user saves a new API key."""
         self._cached_api_key = None
 
     # ------------------------------------------------------------------
     # Rate limiting
     # ------------------------------------------------------------------
 
-    def _throttle(self, running_flag_fn=None) -> None:
-        """Sleep in short increments to respect TMDB rate limits.
-
-        Uses ``QThread.msleep`` in *_THROTTLE_STEP_MS* ms increments
-        instead of a single ``time.sleep`` call so that a worker\'s
-        ``stop()`` signal can be honoured during the wait window.
-
-        Args:
-            running_flag_fn: Optional callable that returns ``False`` when
-                the calling worker has been stopped.  If it returns
-                ``False`` during the wait, ``InterruptedError`` is raised.
-        """
+    def _throttle(self) -> None:
+        """Sleep in 50 ms increments so stop() signals are not blocked."""
         elapsed = time.monotonic() - self._last_request_at
-        remaining_ms = int((self._RATE_LIMIT_DELAY - elapsed) * 1000)
+        remaining_ms = int((_RATE_LIMIT_DELAY - elapsed) * 1000)
         if remaining_ms > 0:
             slept = 0
             while slept < remaining_ms:
-                if running_flag_fn is not None and not running_flag_fn():
-                    raise InterruptedError("Worker stopped during TMDB throttle wait")
-                step = min(self._THROTTLE_STEP_MS, remaining_ms - slept)
-                QThread.msleep(step)
-                slept += step
+                if self._running_flag is not None and not self._running_flag():
+                    raise InterruptedError("TMDBClient: worker stopped during throttle")
+                QThread.msleep(min(50, remaining_ms - slept))
+                slept += 50
         self._last_request_at = time.monotonic()
 
     # ------------------------------------------------------------------
-    # Core request
+    # HTTP helper
     # ------------------------------------------------------------------
 
-    def _get(self, path: str, params: dict, running_flag_fn=None) -> dict:
-        """Fetch *path* with *params*, using DB cache to avoid repeat calls."""
-        cache_key = f"{path}?{urlencode(sorted(params.items()))}"
-        cached = self.cache.get_json("tmdb", cache_key)
-        if cached is not None:
-            log.debug("TMDB cache hit: %s", cache_key)
-            return cached
-
-        self._throttle(running_flag_fn)
-        headers = {"Authorization": f"Bearer {self._api_key()}"}
-        url = f"{self.BASE_URL}{path}"
-        log.debug("TMDB GET %s params=%s", path, params)
-
-        response = self._session.get(url, params=params, headers=headers, timeout=10)
-        response.raise_for_status()
-        payload: dict = response.json()
-
-        self.cache.set_json("tmdb", cache_key, payload)
-        return payload
+    def _get(self, endpoint: str, params: dict | None = None) -> dict:
+        self._throttle()
+        token = self._api_key()
+        qs  = urllib.parse.urlencode(params or {})
+        url = f"{_BASE_URL}{endpoint}{'?' + qs if qs else ''}"
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {token}"}
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode("utf-8"))
 
     # ------------------------------------------------------------------
-    # Public API methods
+    # Public endpoints
     # ------------------------------------------------------------------
 
-    def search_movie(self, title: str, year: int | None = None) -> dict:
-        """Search TMDB for a movie by title and optional release year."""
-        params: dict = {"query": title}
+    def search_movie(self, query: str, year: int | None = None) -> dict:
+        params: dict = {"query": query, "include_adult": "false"}
         if year:
-            params["primary_release_year"] = year
+            params["year"] = str(year)
         return self._get("/search/movie", params)
 
-    def search_tv(self, title: str) -> dict:
-        """Search TMDB for a TV show by title."""
-        return self._get("/search/tv", {"query": title})
+    def search_tv(self, query: str) -> dict:
+        return self._get("/search/tv", {"query": query, "include_adult": "false"})
 
-    def movie_details(self, tmdb_id: int) -> dict:
-        """Fetch full movie details for *tmdb_id*."""
-        return self._get(f"/movie/{tmdb_id}", {})
+    def get_movie_details(self, tmdb_id: int) -> dict:
+        return self._get(f"/movie/{tmdb_id}", {"append_to_response": "credits,videos"})
 
-    def tv_details(self, tmdb_id: int) -> dict:
-        """Fetch full TV show details for *tmdb_id*."""
-        return self._get(f"/tv/{tmdb_id}", {})
+    def get_tv_details(self, tmdb_id: int) -> dict:
+        return self._get(f"/tv/{tmdb_id}", {"append_to_response": "credits,videos"})
 
-    def tv_season_details(self, tmdb_id: int, season_number: int) -> dict:
-        """Fetch details for a specific season of a TV show."""
-        return self._get(f"/tv/{tmdb_id}/season/{season_number}", {})
+    def get_season_details(self, series_id: int, season_number: int) -> dict:
+        return self._get(f"/tv/{series_id}/season/{season_number}")

@@ -1,13 +1,21 @@
-"""Shared base class for all background QThread workers.
+"""BaseWorker — shared QThread plumbing for all background workers.
 
-All workers in this package share identical boilerplate:
-  - ``failed = Signal(str)``
-  - ``_running`` cancellation flag
-  - ``stop()`` method
-  - ``run()`` with a top-level try/except that emits ``failed``
+Every worker subclasses this instead of QThread directly::
 
-Subclasses override ``_execute()`` instead of ``run()``.
+    class MyScanWorker(BaseWorker):
+        finished = Signal(dict)
+
+        def _execute(self) -> None:
+            result = do_work()
+            self.finished.emit(result)
+
+The base class provides:
+  - ``failed = Signal(str)`` emitted on unhandled exceptions in _execute
+  - ``_running`` flag set to False by ``stop()``
+  - ``run()`` wrapper that calls ``_execute()`` inside a try/except
 """
+from __future__ import annotations
+
 import logging
 
 from PySide6.QtCore import QThread, Signal
@@ -16,46 +24,25 @@ log = logging.getLogger(__name__)
 
 
 class BaseWorker(QThread):
-    """Common plumbing shared by all background workers.
+    """Common plumbing shared by all background workers."""
 
-    Subclass and override ``_execute()``:
-
-    .. code-block:: python
-
-        class MyWorker(BaseWorker):
-            finished = Signal(dict)
-
-            def __init__(self) -> None:
-                super().__init__()
-                self.service = MyService()
-
-            def _execute(self) -> None:
-                result = self.service.do_work(self._running_fn)
-                self.finished.emit(result)
-    """
-
-    failed = Signal(str)
+    failed: Signal = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
-        self._running = True
+        self._running: bool = True
 
     def stop(self) -> None:
-        """Request graceful cancellation.  Workers check ``_running`` in their loop."""
+        """Signal the worker to stop gracefully on the next iteration."""
         self._running = False
 
-    def _running_fn(self) -> bool:
-        """Callable form of the running flag, suitable for passing to services."""
-        return self._running
-
     def run(self) -> None:
-        """Entry point called by Qt.  Do not override — override ``_execute()`` instead."""
         try:
             self._execute()
-        except Exception as exc:
-            log.exception("%s failed: %s", type(self).__name__, exc)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Worker %s raised: %s", self.__class__.__name__, exc)
             self.failed.emit(str(exc))
 
     def _execute(self) -> None:
-        """Override in subclasses to implement the worker\'s actual logic."""
-        raise NotImplementedError(f"{type(self).__name__} must implement _execute()")
+        """Override in subclasses. Called inside a try/except by run()."""
+        raise NotImplementedError(f"{self.__class__.__name__} must implement _execute()")

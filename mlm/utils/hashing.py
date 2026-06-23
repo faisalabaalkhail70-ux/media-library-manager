@@ -1,83 +1,61 @@
-"""File hashing utilities used for duplicate detection.
+"""File hashing utilities for duplicate detection.
 
-Uses BLAKE2b (digest_size=20) instead of MD5:
-  - No known collisions
-  - ~3x faster than SHA-256 on modern CPUs
-  - Available in stdlib; zero extra dependencies
-
-Legacy ``partial_md5`` / ``full_md5`` names are kept as deprecated
-aliases so existing callers continue to work during migration.
+Changes in v1.1
+---------------
+* MD5 replaced with BLAKE2b (digest_size=20 -> 40-char hex string).
+  BLAKE2b has no known collisions, is ~3x faster than SHA-256, and is
+  recommended for file integrity checking.
+* HASH_ALGO constant exported so the DB hash_algo column stays in sync.
+* Old partial_md5 / full_md5 names kept as deprecated aliases so existing
+  call-sites do not break before they are migrated.
 """
+from __future__ import annotations
+
 import hashlib
 import logging
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-CHUNK_SIZE    = 1024 * 1024        # 1 MB read chunks
-PARTIAL_BYTES = 10 * 1024 * 1024  # first 10 MB for partial hash
-_DIGEST_SIZE  = 20                 # 20 bytes = 40 hex chars
+CHUNK_SIZE: int = 1024 * 1024        # 1 MiB read buffer
+PARTIAL_BYTES: int = 10 * 1024 * 1024  # first 10 MiB for quick-hash
+HASH_ALGO: str = "blake2b-20"         # store this in the DB hash_algo column
 
 
-def partial_hash(file_path: str, limit_bytes: int = PARTIAL_BYTES) -> str:
-    """Return a BLAKE2b hex digest of the first *limit_bytes* of *file_path*.
-
-    Useful as a cheap pre-filter before computing a full hash.
-
-    Raises:
-        OSError: if the file cannot be read.
-    """
-    h = hashlib.blake2b(digest_size=_DIGEST_SIZE)
+def partial_blake2b(file_path: str | Path, limit_bytes: int = PARTIAL_BYTES) -> str:
+    """Return a BLAKE2b hex digest of the first *limit_bytes* of *file_path*."""
+    h = hashlib.blake2b(digest_size=20)
     remaining = limit_bytes
-    with open(file_path, "rb") as f:
+    with open(file_path, "rb") as fh:
         while remaining > 0:
-            chunk = f.read(min(CHUNK_SIZE, remaining))
+            chunk = fh.read(min(CHUNK_SIZE, remaining))
             if not chunk:
                 break
             h.update(chunk)
             remaining -= len(chunk)
-    digest = h.hexdigest()
-    log.debug("partial_hash(%s) = %s", Path(file_path).name, digest)
-    return digest
+    return h.hexdigest()
 
 
-def full_hash(file_path: str) -> str:
-    """Return a BLAKE2b hex digest of the entire file at *file_path*.
-
-    Raises:
-        OSError: if the file cannot be read.
-    """
-    h = hashlib.blake2b(digest_size=_DIGEST_SIZE)
-    with open(file_path, "rb") as f:
-        for chunk in iter(lambda: f.read(CHUNK_SIZE), b""):
+def full_blake2b(file_path: str | Path) -> str:
+    """Return a BLAKE2b hex digest of the entire *file_path*."""
+    h = hashlib.blake2b(digest_size=20)
+    with open(file_path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(CHUNK_SIZE), b""):
             h.update(chunk)
-    digest = h.hexdigest()
-    log.debug("full_hash(%s) = %s", Path(file_path).name, digest)
-    return digest
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------
-# Deprecated aliases — kept for backward compatibility during migration.
-# New code should call partial_hash() / full_hash() directly.
+# Deprecated aliases — remove after all call-sites are migrated to blake2b
 # ---------------------------------------------------------------------------
 
-def partial_md5(file_path: str, limit_bytes: int = PARTIAL_BYTES) -> str:  # noqa: D103
-    """Deprecated: use partial_hash() instead."""
-    import warnings
-    warnings.warn(
-        "partial_md5() is deprecated; use partial_hash() (BLAKE2b) instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return partial_hash(file_path, limit_bytes)
+def partial_md5(file_path: str | Path, limit_bytes: int = PARTIAL_BYTES) -> str:
+    """Deprecated: use partial_blake2b() instead."""
+    log.warning("partial_md5() is deprecated; switch to partial_blake2b().")
+    return partial_blake2b(file_path, limit_bytes)
 
 
-def full_md5(file_path: str) -> str:  # noqa: D103
-    """Deprecated: use full_hash() instead."""
-    import warnings
-    warnings.warn(
-        "full_md5() is deprecated; use full_hash() (BLAKE2b) instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return full_hash(file_path)
+def full_md5(file_path: str | Path) -> str:
+    """Deprecated: use full_blake2b() instead."""
+    log.warning("full_md5() is deprecated; switch to full_blake2b().")
+    return full_blake2b(file_path)
