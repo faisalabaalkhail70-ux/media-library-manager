@@ -1,217 +1,190 @@
-"""E-4 Folder Restructuring / Auto-Move Service.
+"""E-4 — Folder Restructuring / Auto-Move service.
 
-Builds a target path for a media file based on a configurable template
-and moves the file on disk, updating the DB and writing an action_ledger
-entry for full undo support.
+Builds a canonical target path from a configurable template and moves
+files there.  Every move is logged in the ``restructure_log`` table.
 
 Template tokens
 ---------------
-  {media_type}     'movie' | 'show'
-  {title}          entity title (sanitised for filesystem)
-  {sort_title}     sort-safe title (The Dark Knight -> Dark Knight, The)
-  {year}           release year or ''
-  {genre}          first genre or 'Unknown'
-  {resolution}     '4K' | '1080p' | '720p' | 'SD'
-  {video_codec}    e.g. 'HEVC' | 'AVC'
-  {first_letter}   first letter of sort_title, uppercase
+{media_type}   movie | show
+{title}        Sanitised title from the DB entity
+{year}         Release year (or empty string)
+{resolution}   e.g. 1080p, 4K (derived from ffprobe metadata if available)
+{codec}        e.g. H.264, H.265
+{extension}    e.g. .mkv
 
-Default templates
------------------
-  movies: {media_type}/{first_letter}/{title} ({year})
-  shows:  {media_type}/{title}/Season {season}
-
-All moves are DRY-RUN by default; pass dry_run=False to execute.
-"""
+Default template:  ``{media_type}/{title} ({year})/"""
 from __future__ import annotations
 
 import logging
 import re
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mlm.db.connection import get_connection
+from mlm.db.repositories.settings_repo import SettingsRepository
+
+if TYPE_CHECKING:
+    pass
 
 log = logging.getLogger(__name__)
 
-_SANITISE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-_MULTI_SP = re.compile(r" {2,}")
-
-DEFAULT_MOVIE_TEMPLATE = "{media_type}/{first_letter}/{title} ({year})"
-DEFAULT_SHOW_TEMPLATE  = "{media_type}/{title}/Season {season:02d}"
+_UNSAFE_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_DEFAULT_TEMPLATE = "{media_type}/{title} ({year})"
 
 
 def _sanitise(name: str) -> str:
-    """Remove characters illegal on Windows/macOS/Linux filesystems."""
-    return _MULTI_SP.sub(" ", _SANITISE.sub("_", name)).strip(" .")
-
-
-def _resolution_label(width: int | None) -> str:
-    if not width:
-        return "SD"
-    if width >= 3840:
-        return "4K"
-    if width >= 1920:
-        return "1080p"
-    if width >= 1280:
-        return "720p"
-    return "SD"
+    """Replace characters illegal in filesystem names."""
+    return _UNSAFE_CHARS.sub("_", name).strip(". ")
 
 
 class FolderRestructureService:
-    """Computes and (optionally) executes file moves."""
+    """Move media files into a canonical directory hierarchy."""
 
-    def __init__(
+    def __init__(self) -> None:
+        self._settings = SettingsRepository()
+
+    @property
+    def template(self) -> str:
+        return self._settings.get("folder_template", _DEFAULT_TEMPLATE)
+
+    def preview(self, directory_id: int) -> list[dict]:
+        """Return a list of proposed moves without touching disk."""
+        return self._collect_moves(directory_id, dry_run=True)
+
+    def restructure_directory(
         self,
-        base_dir: str | Path,
-        movie_template: str = DEFAULT_MOVIE_TEMPLATE,
-        show_template: str  = DEFAULT_SHOW_TEMPLATE,
-    ) -> None:
-        self.base_dir        = Path(base_dir)
-        self.movie_template  = movie_template
-        self.show_template   = show_template
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def preview(self, media_file_id: int) -> dict:
-        """Return {'current': str, 'proposed': str, 'will_move': bool}."""
-        row = self._load(media_file_id)
-        if not row:
-            return {"error": "file not found"}
-        proposed = self._build_target(row)
-        current  = Path(row["file_path"])
-        return {
-            "current":   str(current),
-            "proposed":  str(proposed),
-            "will_move": current.resolve() != proposed.resolve(),
-        }
-
-    def move_file(
-        self,
-        media_file_id: int,
-        dry_run: bool = True,
-    ) -> dict:
-        """Move a single file. Returns a result dict."""
-        row      = self._load(media_file_id)
-        if not row:
-            return {"status": "error", "reason": "file not found"}
-        src      = Path(row["file_path"])
-        dst      = self._build_target(row)
-
-        if src.resolve() == dst.resolve():
-            return {"status": "skipped", "reason": "already in correct location"}
-
-        log.info("[Restructure] %s  %s -> %s", "DRY" if dry_run else "MOVE", src, dst)
-
-        if dry_run:
-            return {"status": "dry_run", "src": str(src), "dst": str(dst)}
-
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if dst.exists():
-            return {
-                "status": "error",
-                "reason": f"Destination already exists: {dst}",
-            }
-
-        try:
-            shutil.move(str(src), str(dst))
-        except OSError as exc:
-            self._ledger(media_file_id, str(src), str(dst), "error", str(exc))
-            return {"status": "error", "reason": str(exc)}
-
-        self._update_db(media_file_id, str(src), str(dst))
-        self._ledger(media_file_id, str(src), str(dst), "ok", None)
-        return {"status": "moved", "src": str(src), "dst": str(dst)}
-
-    def bulk_move(
-        self,
-        directory_id: int | None = None,
-        dry_run: bool = True,
+        directory_id: int,
+        dry_run: bool = False,
     ) -> list[dict]:
-        """Preview or execute moves for all (or a directory's) files."""
-        with get_connection() as conn:
-            if directory_id is not None:
-                rows = conn.execute(
-                    "SELECT id FROM media_files "
-                    "WHERE removed_at IS NULL AND directory_id=?",
-                    (directory_id,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT id FROM media_files WHERE removed_at IS NULL"
-                ).fetchall()
-        results = []
-        for r in rows:
-            results.append(self.move_file(r["id"], dry_run=dry_run))
+        """Move files and return a log of every action taken."""
+        results = self._collect_moves(directory_id, dry_run=dry_run)
+        if not dry_run:
+            self._persist_log(results)
         return results
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _load(self, media_file_id: int) -> dict | None:
+    def _collect_moves(
+        self,
+        directory_id: int,
+        dry_run: bool,
+    ) -> list[dict]:
         with get_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT f.*, e.title, e.sort_title, e.release_year,
-                       e.genres_json, e.media_type,
-                       ep.season_number
-                FROM   media_files f
-                LEFT JOIN media_entities e  ON e.id = f.entity_id
-                LEFT JOIN episodes ep       ON ep.media_file_id = f.id
-                WHERE  f.id = ?
-                """,
-                (media_file_id,),
+            dir_row = conn.execute(
+                "SELECT path FROM directories WHERE id = ?", (directory_id,)
             ).fetchone()
-        return dict(row) if row else None
+            if not dir_row:
+                raise ValueError(f"Directory {directory_id} not found")
+            root = Path(dir_row["path"])
 
-    def _build_target(self, row: dict) -> Path:
-        import json
-        title      = _sanitise(row.get("title") or row["file_name"])
-        sort_title = _sanitise(row.get("sort_title") or title)
-        year       = str(row.get("release_year") or "")
-        first      = (sort_title[0].upper() if sort_title else "#")
-        media_type = row.get("media_type") or "movie"
-        season     = row.get("season_number") or 1
-        genres     = []
-        try:
-            genres = json.loads(row.get("genres_json") or "[]")
-        except Exception:  # noqa: BLE001
-            pass
-        genre      = genres[0].get("name", "Unknown") if genres else "Unknown"
-        resolution = _resolution_label(row.get("width"))
-        codec      = (row.get("video_codec") or "Unknown").upper()
-        ext        = Path(row["file_path"]).suffix
-
-        tmpl = self.show_template if media_type in ("show", "episode") else self.movie_template
-        rel  = tmpl.format(
-            media_type=media_type,
-            title=title,
-            sort_title=sort_title,
-            year=year,
-            genre=genre,
-            resolution=resolution,
-            video_codec=codec,
-            first_letter=first,
-            season=season,
-        )
-        return self.base_dir / rel / (title + ext)
-
-    def _update_db(self, fid: int, old: str, new: str) -> None:
-        with get_connection() as conn:
-            conn.execute(
-                "UPDATE media_files SET file_path=?, moved_to_path=? WHERE id=?",
-                (new, old, fid),
-            )
-
-    def _ledger(self, fid: int, old: str, new: str, status: str, err: str | None) -> None:
-        with get_connection() as conn:
-            conn.execute(
+            rows = conn.execute(
                 """
-                INSERT INTO action_ledger
-                    (action_type, media_file_id, old_path, new_path, status, error_message)
-                VALUES ('auto_move', ?, ?, ?, ?, ?)
+                SELECT
+                    mf.id, mf.file_path, mf.file_name,
+                    e.title, e.release_year, e.media_type,
+                    mf.metadata_json
+                FROM media_files mf
+                LEFT JOIN file_entity_links fel ON fel.file_id = mf.id
+                LEFT JOIN media_entities e ON e.id = fel.entity_id
+                WHERE mf.directory_id = ?
+                  AND mf.is_missing = 0
                 """,
-                (fid, old, new, status, err),
+                (directory_id,),
+            ).fetchall()
+
+        results: list[dict] = []
+        for row in rows:
+            current = Path(row["file_path"])
+            if not current.exists():
+                continue
+            target = self._build_target_path(row, root)
+            if target == current:
+                continue
+            entry = {
+                "file_id":  row["id"],
+                "old_path": str(current),
+                "new_path": str(target),
+                "status":   "pending",
+            }
+            if not dry_run:
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(current), str(target))
+                    entry["status"] = "moved"
+                    # Update DB immediately so health scans stay accurate
+                    with get_connection() as conn:
+                        conn.execute(
+                            "UPDATE media_files SET file_path=? WHERE id=?",
+                            (str(target), row["id"]),
+                        )
+                    log.info("Moved: %s → %s", current, target)
+                except OSError as exc:
+                    entry["status"] = f"error: {exc}"
+                    log.error("Move failed %s: %s", current, exc)
+            results.append(entry)
+        return results
+
+    def _build_target_path(self, row: dict, root: Path) -> Path:
+        import json
+        meta: dict = {}
+        if row["metadata_json"]:
+            try:
+                meta = json.loads(row["metadata_json"])
+            except Exception:  # noqa: BLE001
+                pass
+
+        resolution = self._extract_resolution(meta)
+        codec = self._extract_codec(meta)
+        ext = Path(row["file_name"]).suffix
+
+        tokens = {
+            "media_type": _sanitise(row["media_type"] or "unknown"),
+            "title":      _sanitise(row["title"] or Path(row["file_name"]).stem),
+            "year":       str(row["release_year"]) if row["release_year"] else "",
+            "resolution": resolution,
+            "codec":      codec,
+            "extension":  ext,
+        }
+        rel_dir = self.template.format_map(tokens)
+        filename = _sanitise(Path(row["file_name"]).stem) + ext
+        return root / rel_dir / filename
+
+    @staticmethod
+    def _extract_resolution(meta: dict) -> str:
+        streams = meta.get("streams", [])
+        for s in streams:
+            if s.get("codec_type") == "video":
+                h = s.get("height", 0)
+                if h >= 2160:
+                    return "4K"
+                if h >= 1080:
+                    return "1080p"
+                if h >= 720:
+                    return "720p"
+                return f"{h}p" if h else ""
+        return ""
+
+    @staticmethod
+    def _extract_codec(meta: dict) -> str:
+        streams = meta.get("streams", [])
+        for s in streams:
+            if s.get("codec_type") == "video":
+                return s.get("codec_name", "").upper()
+        return ""
+
+    def _persist_log(self, entries: list[dict]) -> None:
+        rows = [
+            (e["file_id"], e["old_path"], e["new_path"], e["status"])
+            for e in entries
+        ]
+        with get_connection() as conn:
+            conn.executemany(
+                """
+                INSERT INTO restructure_log (file_id, old_path, new_path, status, created_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                rows,
             )
