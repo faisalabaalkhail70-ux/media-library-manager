@@ -5,6 +5,13 @@ from mlm.db.connection import get_connection
 class DashboardService:
 
     def library_overview(self) -> dict:
+        """Return a single-pass library stats dict.
+
+        Previously opened two separate ``get_connection()`` contexts for one
+        logical read, which introduced a consistency window between them and
+        doubled the connection overhead.  Both queries now run inside a single
+        connection.
+        """
         with get_connection() as conn:
             df = pd.read_sql_query(
                 """
@@ -21,6 +28,10 @@ class DashboardService:
                 """,
                 conn,
             )
+            # Fetch show count in the same connection/transaction.
+            total_shows = conn.execute(
+                "SELECT COUNT(*) FROM media_entities WHERE media_type = 'show'"
+            ).fetchone()[0]
 
         if df.empty:
             return {
@@ -36,16 +47,9 @@ class DashboardService:
         storage_gb     = float(df["file_size_bytes"].fillna(0).sum() / (1024 ** 3))
         watch_hours    = float(df["duration_seconds"].fillna(0).sum() / 3600)
 
-        with get_connection() as conn:
-            shows_df = pd.read_sql_query(
-                "SELECT COUNT(*) AS c FROM media_entities WHERE media_type = 'show'",
-                conn,
-            )
-        total_shows = int(shows_df["c"].iloc[0])
-
         return {
             "total_files": total_files, "total_movies": total_movies,
-            "total_shows": total_shows, "total_episodes": total_episodes,
+            "total_shows": int(total_shows), "total_episodes": total_episodes,
             "unmatched": unmatched,
             "storage_gb": round(storage_gb, 2),
             "watch_hours": round(watch_hours, 2),
@@ -110,23 +114,31 @@ class DashboardService:
             )
         return df.to_dict(orient="records")
 
-    def recent_additions(self, limit: int = 20) -> list[dict]:
+    def health_breakdown(self) -> list[dict]:
         with get_connection() as conn:
             df = pd.read_sql_query(
                 """
-                SELECT file_name, file_path, discovered_at
+                SELECT COALESCE(health_status, 'unknown') AS health_status,
+                       COUNT(*) AS count
                 FROM media_files WHERE removed_at IS NULL
-                ORDER BY discovered_at DESC LIMIT ?
+                GROUP BY health_status ORDER BY count DESC
                 """,
                 conn,
-                params=(limit,),
             )
         return df.to_dict(orient="records")
 
-    def missing_episodes_count(self) -> int:
+    def recent_additions(self, limit: int = 10) -> list[dict]:
         with get_connection() as conn:
-            df = pd.read_sql_query(
-                "SELECT COUNT(*) AS c FROM episodes WHERE is_missing = 1",
-                conn,
-            )
-        return int(df["c"].iloc[0])
+            rows = conn.execute(
+                """
+                SELECT mf.file_name, mf.file_path, mf.scanned_at,
+                       me.title AS matched_title, me.media_type
+                FROM media_files mf
+                LEFT JOIN media_entities me ON me.id = mf.entity_id
+                WHERE mf.removed_at IS NULL
+                ORDER BY mf.scanned_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
