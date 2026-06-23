@@ -223,10 +223,12 @@ class MoviesView(QWidget):
             if self._res_width(r.get("resolution")) >= 1920
         )
 
-        # Total runtime from the currently visible (filtered) rows
+        # Total runtime from the currently visible (filtered) rows.
+        # duration_seconds is stored as REAL in SQLite, so // still returns a
+        # float in Python.  Cast to int before using the :02d format code.
         total_secs = sum(r.get("duration_seconds") or 0 for r in rows)
-        h = total_secs // 3600
-        m = (total_secs % 3600) // 60
+        h = int(total_secs // 3600)
+        m = int((total_secs % 3600) // 60)
 
         # Size
         if total_b >= 1024 ** 4:
