@@ -134,15 +134,20 @@ class DashboardService:
         return df.to_dict(orient="records")
 
     def recent_additions(self, limit: int = 10) -> list[dict]:
+        # The media_files table uses `discovered_at` (set by the scanner on
+        # first insert).  There is no `scanned_at` column in the schema.
         with get_connection() as conn:
             rows = conn.execute(
                 """
-                SELECT mf.file_name, mf.file_path, mf.scanned_at,
-                       me.title AS matched_title, me.media_type
+                SELECT mf.file_name,
+                       mf.file_path,
+                       mf.discovered_at,
+                       me.title AS matched_title,
+                       me.media_type
                 FROM media_files mf
                 LEFT JOIN media_entities me ON me.id = mf.entity_id
                 WHERE mf.removed_at IS NULL
-                ORDER BY mf.scanned_at DESC
+                ORDER BY mf.discovered_at DESC
                 LIMIT ?
                 """,
                 (limit,),
