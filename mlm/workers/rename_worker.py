@@ -1,18 +1,24 @@
-from PySide6.QtCore import QThread, Signal
-from mlm.services.rename_service import RenameService
+"""Background worker that applies a rename preview to disk and the DB."""
+import logging
 
-class RenameWorker(QThread):
+from PySide6.QtCore import Signal
+
+from mlm.services.rename_service import RenameService
+from mlm.workers.base_worker import BaseWorker
+
+log = logging.getLogger(__name__)
+
+
+class RenameWorker(BaseWorker):
+    """Apply a rename preview list in the background."""
+
     finished_apply = Signal(dict)
-    failed = Signal(str)
 
     def __init__(self, preview_rows: list[dict]) -> None:
         super().__init__()
         self.preview_rows = preview_rows
         self.service = RenameService()
 
-    def run(self) -> None:
-        try:
-            result = self.service.apply_preview(self.preview_rows)
-            self.finished_apply.emit(result)
-        except Exception as exc:
-            self.failed.emit(str(exc))
+    def _execute(self) -> None:
+        result = self.service.apply_preview(self.preview_rows)
+        self.finished_apply.emit(result)
