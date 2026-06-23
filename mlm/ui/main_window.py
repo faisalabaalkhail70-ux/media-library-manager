@@ -391,6 +391,7 @@ class MainWindow(QMainWindow):
         self._active_workers = 0
         density = settings.get("ui_row_density", "comfortable")
         self._row_height = 20 if density == "compact" else 28
+        self._apply_row_density()
 
         # Wire the corrupted-folders badge: connect HealthView panel signal
         health_view: HealthView = self.stack.widget(_HEALTH_NAV_INDEX)
@@ -404,6 +405,26 @@ class MainWindow(QMainWindow):
 
         self._check_startup_health()
         self.switch_view(0)
+
+    # ──────────────────────────────────────────────────────────────────
+    def _apply_row_density(self) -> None:
+        """Push the saved row-height preference to every table in the stack.
+
+        Each view may expose its primary table as any of the common attribute
+        names below.  We try each in order and set verticalHeader default
+        section size on the first match found.
+        """
+        _TABLE_ATTRS = ("table", "_table", "table_view", "_table_view", "view")
+        for i in range(self.stack.count()):
+            view = self.stack.widget(i)
+            for attr in _TABLE_ATTRS:
+                widget = getattr(view, attr, None)
+                if widget is not None and hasattr(widget, "verticalHeader"):
+                    try:
+                        widget.verticalHeader().setDefaultSectionSize(self._row_height)
+                    except Exception:
+                        pass
+                    break
 
     def _check_startup_health(self) -> None:
         try:

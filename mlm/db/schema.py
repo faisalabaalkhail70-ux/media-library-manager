@@ -188,14 +188,25 @@ CURRENT_VERSION = 4
 
 
 def init_database() -> None:
-    """Initialise schema and apply any outstanding migrations."""
+    """Initialise schema and apply any outstanding migrations.
+
+    NOTE: executescript() issues an implicit COMMIT before it runs, which means
+    any subsequent writes inside the same get_connection() block are in a fresh
+    implicit transaction that is NOT rolled back on failure by the context manager.
+    To keep the schema_version write inside the managed transaction we:
+      1. Call executescript() for DDL only (safe — DDL is always auto-committed in SQLite).
+      2. Read the current version.
+      3. Write the new version with an explicit DELETE + INSERT so there is always
+         exactly one row and the write participates in the get_connection() commit.
+    """
     with get_connection() as conn:
         conn.executescript(SCHEMA_SQL)
-        row = conn.execute("SELECT version FROM schema_version").fetchone()
+        row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
         existing = row["version"] if row else 0
         if existing < CURRENT_VERSION:
+            conn.execute("DELETE FROM schema_version")
             conn.execute(
-                "INSERT OR REPLACE INTO schema_version(version) VALUES (?)",
+                "INSERT INTO schema_version(version) VALUES (?)",
                 (CURRENT_VERSION,),
             )
             log.info("Schema upgraded from version %d to %d", existing, CURRENT_VERSION)

@@ -8,12 +8,17 @@ from mlm.app.config import AppConfig
 from mlm.app.paths import ensure_app_dirs, LOG_DIR
 from mlm.db.schema import init_database
 from mlm.ui.main_window import MainWindow
-from mlm.ui.styles import APP_STYLESHEET
 from mlm.utils.logging_utils import setup_logging
 
 
 def run_app() -> None:
-    """Entry point: set up infrastructure, then run the Qt event loop."""
+    """Entry point: set up infrastructure, then run the Qt event loop.
+
+    NOTE: The application stylesheet is intentionally NOT set here.
+    MainWindow.__init__ reads the saved theme from the DB via SettingsRepository
+    and calls QApplication.instance().setStyleSheet(get_stylesheet(theme)),
+    so any stylesheet set before the window is created would be overwritten.
+    """
     ensure_app_dirs()
     setup_logging(LOG_DIR / "atlas.log")
 
@@ -25,7 +30,6 @@ def run_app() -> None:
     app = QApplication(sys.argv)
     cfg = AppConfig()
     app.setApplicationName(cfg.app_name)
-    app.setStyleSheet(APP_STYLESHEET)
 
     window = MainWindow()
     window.resize(cfg.window_width, cfg.window_height)
