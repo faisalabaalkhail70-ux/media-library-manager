@@ -181,9 +181,9 @@ class ScannerView(QWidget):
             return
 
         with get_connection() as conn:
-            # Step 1 — collect IDs of all files in this directory
+            # Step 1 — collect IDs of ALL files (active + soft-deleted) for this dir
             file_ids = [
-                r[0] for r in conn.execute(
+                r["id"] for r in conn.execute(
                     "SELECT id FROM media_files WHERE directory_id = ?", (dir_id,)
                 ).fetchall()
             ]
@@ -204,7 +204,7 @@ class ScannerView(QWidget):
                     file_ids,
                 )
 
-                # Step 4 — null action_ledger FK (preserve history)
+                # Step 4 — null action_ledger FK (preserve rename/move history)
                 conn.execute(
                     f"UPDATE action_ledger SET media_file_id = NULL "
                     f"WHERE media_file_id IN ({ph})",
@@ -224,18 +224,41 @@ class ScannerView(QWidget):
                 """
             )
 
-            # Step 7 — clean up orphan media_entities
-            conn.execute(
-                """
-                DELETE FROM media_entities
-                WHERE id NOT IN (
-                    SELECT DISTINCT entity_id FROM media_files
-                    WHERE entity_id IS NOT NULL AND removed_at IS NULL
-                )
-                """
-            )
+            # Step 7 — identify truly orphaned entities:
+            #   an entity is orphaned only when NO media_files row (including
+            #   soft-deleted rows with removed_at set) still references it.
+            #   Using removed_at IS NULL alone caused FK errors because soft-
+            #   deleted files kept their entity_id after the entity was gone.
+            orphan_entity_ids = [
+                r["id"] for r in conn.execute(
+                    """
+                    SELECT id FROM media_entities
+                    WHERE id NOT IN (
+                        SELECT DISTINCT entity_id FROM media_files
+                        WHERE entity_id IS NOT NULL
+                    )
+                    """
+                ).fetchall()
+            ]
 
-            # Step 8 — delete scan_runs (FK → directories), then the directory
+            if orphan_entity_ids:
+                eph = ",".join("?" * len(orphan_entity_ids))
+
+                # Step 8 — delete episode rows for orphaned entities BEFORE
+                #   deleting the entities themselves (episodes.entity_id FK,
+                #   no ON DELETE CASCADE in schema).
+                conn.execute(
+                    f"DELETE FROM episodes WHERE entity_id IN ({eph})",
+                    orphan_entity_ids,
+                )
+
+                # Step 9 — now safe to delete orphan entities
+                conn.execute(
+                    f"DELETE FROM media_entities WHERE id IN ({eph})",
+                    orphan_entity_ids,
+                )
+
+            # Step 10 — delete scan_runs (FK → directories), then the directory
             conn.execute("DELETE FROM scan_runs WHERE directory_id = ?", (dir_id,))
             conn.execute("DELETE FROM directories WHERE id = ?", (dir_id,))
 
