@@ -2,22 +2,21 @@
 import logging
 from pathlib import Path
 
+from mlm.app.config import AppConfig
 from mlm.db.connection import get_connection
 
 log = logging.getLogger(__name__)
 
-# Extensions that HealthService and AppConfig share; keep in sync with config.
-VALID_EXTS: frozenset[str] = frozenset({
-    ".mkv", ".mp4", ".avi", ".m4v", ".mov",
-    ".wmv", ".ts", ".webm", ".flv", ".vob",
-})
+# Single source of truth: derive valid extensions from AppConfig.
+_cfg = AppConfig()
+VALID_EXTS: frozenset[str] = frozenset(_cfg.supported_video_exts)
 
 
 class HealthService:
     """Scan every known media file and assign a health_status label."""
 
-    MOVIE_SMALL_BYTES = 50 * 1024 * 1024   # 50 MB
-    EPISODE_SMALL_BYTES = 20 * 1024 * 1024  # 20 MB
+    MOVIE_SMALL_BYTES   = 50 * 1024 * 1024   # 50 MB
+    EPISODE_SMALL_BYTES = 20 * 1024 * 1024   # 20 MB
 
     def list_files_for_health_scan(self) -> list[dict]:
         """Return all active (non-removed) media file rows."""
@@ -45,7 +44,7 @@ class HealthService:
         elif size < self.EPISODE_SMALL_BYTES:
             notes.append("Unusually small file (< 20 MB)")
         elif size < self.MOVIE_SMALL_BYTES:
-            notes.append("Small file — may be an episode or short clip")
+            notes.append("Small file \u2014 may be an episode or short clip")
 
         if row["extension"].lower() not in VALID_EXTS:
             notes.append(f"Unsupported extension: {row['extension']}")
@@ -68,25 +67,32 @@ class HealthService:
     def run_health_scan(self) -> dict:
         """Evaluate every file and write results back to the DB.
 
+        All updates are batched into a single ``executemany`` call to
+        avoid the N+1 write pattern that previously caused 10,000+
+        individual UPDATE statements on large libraries.
+
         Returns:
             Counts dict: ``{"ok": n, "warning": n, "error": n}``.
         """
         rows = self.list_files_for_health_scan()
         counts: dict[str, int] = {"ok": 0, "warning": 0, "error": 0}
+        updates: list[tuple[str, str, int]] = []
+
+        for row in rows:
+            status, notes = self.evaluate_file(row)
+            updates.append((status, notes, row["id"]))
+            counts[status] += 1
+            log.debug("Health %s: %s", status, row["file_path"])
 
         with get_connection() as conn:
-            for row in rows:
-                status, notes = self.evaluate_file(row)
-                conn.execute(
-                    """
-                    UPDATE media_files
-                    SET health_status = ?, health_notes = ?
-                    WHERE id = ?
-                    """,
-                    (status, notes, row["id"]),
-                )
-                counts[status] += 1
-                log.debug("Health %s: %s", status, row["file_path"])
+            conn.executemany(
+                """
+                UPDATE media_files
+                SET health_status = ?, health_notes = ?
+                WHERE id = ?
+                """,
+                updates,
+            )
 
         log.info("Health scan complete: %s", counts)
         return counts
