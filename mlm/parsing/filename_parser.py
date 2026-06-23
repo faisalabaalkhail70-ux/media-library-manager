@@ -1,7 +1,10 @@
-import os
+"""Parse a media filename into a structured ``ParsedMediaName`` object."""
 import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
+
 from mlm.parsing.plex_patterns import MOVIE_YEAR_PATTERN, TV_PATTERNS, NOISE_TOKENS
+
 
 @dataclass(slots=True)
 class ParsedMediaName:
@@ -13,13 +16,17 @@ class ParsedMediaName:
     season_number: int | None = None
     episode_number: int | None = None
 
+
 def _cleanup_name(name: str) -> str:
     name = name.replace(".", " ").replace("_", " ").strip()
     parts = [p for p in name.split() if p.lower() not in NOISE_TOKENS]
     return re.sub(r"\s+", " ", " ".join(parts)).strip()
 
+
 def parse_media_filename(file_name: str) -> ParsedMediaName:
-    stem, _ = os.path.splitext(file_name)
+    # PurePosixPath.stem strips the extension the same way os.path.splitext
+    # does, but is consistent with the pathlib style used throughout the project.
+    stem = PurePosixPath(file_name).stem
     cleaned = _cleanup_name(stem)
 
     for pattern in TV_PATTERNS:
