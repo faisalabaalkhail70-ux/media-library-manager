@@ -38,7 +38,6 @@ class ScanWorker(QThread):
         self.root_path        = Path(root_path).resolve()
         self.valid_exts       = {e.lower() for e in valid_exts}
         self.excluded_folders = excluded_folders or DEFAULT_EXCLUDED_FOLDERS
-        # Full resolved paths of folders to skip entirely
         self.excluded_paths   = {Path(p).resolve() for p in (excluded_paths or set())}
         self._running         = True
         self.scan_service     = ScanService()
@@ -50,15 +49,13 @@ class ScanWorker(QThread):
 
     def _is_excluded(self, path: Path) -> bool:
         """Return True if path is inside an excluded folder name OR an excluded full path."""
-        # 1. Check full-path exclusions (e.g. C:/Movies/Extras specifically selected)
         for excl in self.excluded_paths:
             try:
                 path.relative_to(excl)
-                return True   # path is inside this excluded directory
+                return True
             except ValueError:
                 pass
 
-        # 2. Check folder-name exclusions (e.g. any folder called "sample")
         try:
             rel_parts = path.relative_to(self.root_path).parts[:-1]
         except ValueError:
@@ -93,13 +90,21 @@ class ScanWorker(QThread):
 
                 try:
                     self.scan_service.save_file_record(self.directory_id, path)
+                except OSError as exc:
+                    # File disappeared between rglob discovery and stat() — skip gracefully.
+                    log.warning("Skipped %s (file vanished during scan): %s", path, exc)
+                    seen_paths.discard(path_str)  # don't count it as seen
+                    continue
                 except Exception as exc:
-                    log.error("Failed to save record for %s: %s", path, exc, exc_info=True)
+                    # Unexpected error: log it but keep the scan running.
+                    log.error("Unexpected error saving %s: %s", path, exc, exc_info=True)
                     continue
 
-                files_seen    += 1
-                files_updated += was_known
-                files_added   += not was_known
+                files_seen += 1
+                if was_known:
+                    files_updated += 1
+                else:
+                    files_added += 1
 
                 if files_seen % 10 == 0:
                     self.progress.emit(files_seen, path.name)
@@ -138,7 +143,7 @@ class ScanWorker(QThread):
             files_updated=files_updated, files_removed=files_removed,
             status=status,
         )
-        log.info("Scan %s — seen=%d added=%d updated=%d removed=%d",
+        log.info("Scan %s \u2014 seen=%d added=%d updated=%d removed=%d",
                  status, files_seen, files_added, files_updated, files_removed)
         self.finished_scan.emit({
             "status":        status,
