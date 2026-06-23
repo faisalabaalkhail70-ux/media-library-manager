@@ -9,6 +9,9 @@ _RED     = QColor("#ef9a9a")
 _MUTED   = QColor("#6e6e8a")
 _NORMAL  = QColor("#d0d0e8")
 
+_CENTER = Qt.AlignHCenter | Qt.AlignVCenter
+_LEFT   = Qt.AlignLeft    | Qt.AlignVCenter
+
 
 def _rating_color(rating) -> QColor:
     try:
@@ -42,6 +45,10 @@ class ShowsTableModel(QAbstractTableModel):
     _COL_PCT    = 6
     _COL_RATING = 7
     _COL_GENRES = 8
+
+    # Columns that should be horizontally centered
+    _CENTERED_COLS = {_COL_YEAR, _COL_S_HAVE, _COL_S_MISS,
+                      _COL_E_HAVE, _COL_E_MISS, _COL_PCT, _COL_RATING}
 
     def __init__(self, rows: list[dict] | None = None) -> None:
         super().__init__()
@@ -80,7 +87,7 @@ class ShowsTableModel(QAbstractTableModel):
         ep_total = ep_have + ep_miss
         pct      = round(ep_have / ep_total * 100) if ep_total > 0 else 0
 
-        # ── Rating: round to 1 decimal place ─────────────────────────────────────
+        # ── Rating: round to 1 decimal place ────────────────────────────────────────
         raw_rating = row.get("rating")
         try:
             rating_display = f"{float(raw_rating):.1f}"
@@ -99,6 +106,9 @@ class ShowsTableModel(QAbstractTableModel):
                 rating_display,
                 row.get("genres", "") or "",
             ][col]
+
+        if role == Qt.TextAlignmentRole:
+            return int(_CENTER if col in self._CENTERED_COLS else _LEFT)
 
         if role == Qt.ForegroundRole:
             # ── Always return an explicit color — never None — so Qt's
