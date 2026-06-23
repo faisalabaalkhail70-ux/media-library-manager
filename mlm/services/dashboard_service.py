@@ -7,10 +7,9 @@ class DashboardService:
     def library_overview(self) -> dict:
         """Return a single-pass library stats dict.
 
-        Previously opened two separate ``get_connection()`` contexts for one
-        logical read, which introduced a consistency window between them and
-        doubled the connection overhead.  Both queries now run inside a single
-        connection.
+        Both queries run inside a single connection to eliminate the
+        consistency window that existed when two separate get_connection()
+        calls were used.
         """
         with get_connection() as conn:
             df = pd.read_sql_query(
@@ -28,7 +27,6 @@ class DashboardService:
                 """,
                 conn,
             )
-            # Fetch show count in the same connection/transaction.
             total_shows = conn.execute(
                 "SELECT COUNT(*) FROM media_entities WHERE media_type = 'show'"
             ).fetchone()[0]
@@ -54,6 +52,14 @@ class DashboardService:
             "storage_gb": round(storage_gb, 2),
             "watch_hours": round(watch_hours, 2),
         }
+
+    def missing_episodes_count(self) -> int:
+        """Return the total number of missing episodes across all shows."""
+        with get_connection() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM episodes WHERE is_missing = 1"
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def shows_completion(self) -> dict:
         """Return counts of Complete / Partial / Not Started shows.
