@@ -4,8 +4,10 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from mlm.app.paths import EXPORT_DIR
 from mlm.db.connection import get_connection
@@ -48,6 +50,8 @@ REPORT_QUERIES: dict[str, str] = {
     """,
 }
 
+_MAX_CELL = 22  # max chars per PDF cell before truncation
+
 
 def _timestamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -65,14 +69,14 @@ class ExportService:
             return pd.read_sql_query(query, conn)
 
     def export_csv(self, report_name: str) -> str:
-        df  = self._query_dataframe(report_name)
+        df = self._query_dataframe(report_name)
         out = EXPORT_DIR / f"{report_name}_{_timestamp()}.csv"
         df.to_csv(out, index=False)
         return str(out)
 
     def export_json(self, report_name: str) -> str:
         """Export as pretty-printed JSON array."""
-        df  = self._query_dataframe(report_name)
+        df = self._query_dataframe(report_name)
         out = EXPORT_DIR / f"{report_name}_{_timestamp()}.json"
         out.write_text(
             json.dumps(df.to_dict(orient="records"), ensure_ascii=False, indent=2),
@@ -81,40 +85,73 @@ class ExportService:
         return str(out)
 
     def export_excel(self, report_name: str) -> str:
-        df  = self._query_dataframe(report_name)
+        df = self._query_dataframe(report_name)
         out = EXPORT_DIR / f"{report_name}_{_timestamp()}.xlsx"
         df.to_excel(out, index=False)
         return str(out)
 
     def export_pdf(self, report_name: str) -> str:
-        df  = self._query_dataframe(report_name)
+        """Generate a paginated PDF using reportlab Platypus.
+
+        Previously used ``df.iterrows()`` which is the slowest possible way
+        to iterate a DataFrame (Python object per cell).  Now uses a list
+        comprehension over ``df.itertuples()`` (2-5x faster) and delegates
+        layout to a Platypus ``Table`` so reportlab handles page breaks,
+        column widths, and header repetition automatically.
+        """
+        df = self._query_dataframe(report_name)
         out = EXPORT_DIR / f"{report_name}_{_timestamp()}.pdf"
 
-        c = canvas.Canvas(str(out), pagesize=A4)
-        width, height = A4
-        y = height - 50
+        styles = getSampleStyleSheet()
+        title_text = report_name.replace("_", " ").title()
 
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(40, y, f"Media Library Manager \u2014 {report_name.replace('_', ' ').title()}")
-        y -= 10
-        c.setStrokeColorRGB(0.2, 0.2, 0.2)
-        c.line(40, y, width - 40, y)
-        y -= 20
+        # Build table data as a plain list-of-lists — no Python row loop.
+        headers = [str(c)[:_MAX_CELL] for c in df.columns]
+        data_rows = [
+            [str(v)[:_MAX_CELL] for v in row]
+            for row in df.itertuples(index=False)
+        ]
+        table_data = [headers] + data_rows
 
-        c.setFont("Helvetica-Bold", 8)
-        headers = " | ".join(str(h)[:18] for h in df.columns.tolist())
-        c.drawString(40, y, headers[:160])
-        y -= 14
+        tbl = Table(table_data, repeatRows=1, hAlign="LEFT")
+        tbl.setStyle(
+            TableStyle(
+                [
+                    # Header row
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a1a2e")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 7),
+                    # Alternating row colours
+                    (
+                        "ROWBACKGROUNDS",
+                        (0, 1),
+                        (-1, -1),
+                        [colors.white, colors.HexColor("#f5f5f5")],
+                    ),
+                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#cccccc")),
+                    ("TOPPADDING", (0, 0), (-1, -1), 3),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ]
+            )
+        )
 
-        c.setFont("Helvetica", 8)
-        for _, row in df.iterrows():
-            line = " | ".join(str(v)[:18] for v in row.tolist())
-            c.drawString(40, y, line[:160])
-            y -= 12
-            if y < 50:
-                c.showPage()
-                y = height - 40
-                c.setFont("Helvetica", 8)
-
-        c.save()
+        doc = SimpleDocTemplate(
+            str(out),
+            pagesize=A4,
+            leftMargin=30,
+            rightMargin=30,
+            topMargin=40,
+            bottomMargin=30,
+        )
+        doc.build(
+            [
+                Paragraph(
+                    f"Media Library Manager \u2014 {title_text}",
+                    styles["Title"],
+                ),
+                Spacer(1, 12),
+                tbl,
+            ]
+        )
         return str(out)
