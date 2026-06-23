@@ -21,6 +21,10 @@ class MetadataService:
         self.tmdb = tmdb or TMDBClient()
         self.entities_repo = entities_repo or EntitiesRepository()
 
+    # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
+
     def list_unmatched_files(self, limit: int = 0) -> list[dict]:
         """Return files with no entity link. limit=0 means all."""
         with get_connection() as conn:
@@ -46,6 +50,10 @@ class MetadataService:
                 ).fetchall()
         return [dict(r) for r in rows]
 
+    # ------------------------------------------------------------------
+    # Auto-matching
+    # ------------------------------------------------------------------
+
     def auto_match_file(self, media_file_id: int, file_name: str) -> dict:
         """Parse *file_name*, search TMDB, and link the best result."""
         log.debug("Auto-matching file_id=%d name=%s", media_file_id, file_name)
@@ -60,51 +68,75 @@ class MetadataService:
         log.info("Skipped file_id=%d — unrecognised filename format", media_file_id)
         return {"status": "skipped", "reason": "Unknown filename format"}
 
+    # ------------------------------------------------------------------
+    # Shared upsert helper  (was duplicated verbatim in both matchers)
+    # ------------------------------------------------------------------
+
+    def _upsert_and_link(
+        self,
+        media_file_id: int,
+        details: dict,
+        media_type: str,
+        title_key: str,
+        date_key: str,
+        fallback_title: str,
+    ) -> int:
+        """Upsert a TMDB entity and link it to *media_file_id*.
+
+        Returns the entity_id.
+        """
+        date_str = details.get(date_key) or ""
+        year = int(date_str[:4]) if len(date_str) >= 4 else None
+        entity_id = self.entities_repo.upsert_entity(
+            media_type=media_type,
+            title=details.get(title_key) or fallback_title,
+            release_year=year,
+            tmdb_id=details.get("id"),
+            plot=details.get("overview"),
+            rating=details.get("vote_average"),
+            genres_json=json.dumps(details.get("genres", [])),
+            poster_path=details.get("poster_path"),
+            metadata_json=json.dumps(details),
+        )
+        self.entities_repo.link_file_to_entity(media_file_id, entity_id)
+        return entity_id
+
+    # ------------------------------------------------------------------
+    # Movie matching
+    # ------------------------------------------------------------------
+
     def _match_movie(self, media_file_id: int, parsed, file_name: str) -> dict:
         results = self.tmdb.search_movie(parsed.title or "", parsed.year)
-        best = (results.get("results") or [None])[0]
-        if not best:
+        result_list = results.get("results") or []
+        if not result_list:
             log.info("No TMDB movie result for '%s'", parsed.title)
             return {"status": "unmatched", "reason": "No movie results"}
 
-        details = self.tmdb.movie_details(best["id"])
-        release = details.get("release_date") or ""
-        entity_id = self.entities_repo.upsert_entity(
-            media_type="movie",
-            title=details.get("title") or parsed.title or file_name,
-            release_year=int(release[:4]) if len(release) >= 4 else parsed.year,
-            tmdb_id=details.get("id"),
-            plot=details.get("overview"),
-            rating=details.get("vote_average"),
-            genres_json=json.dumps(details.get("genres", [])),
-            poster_path=details.get("poster_path"),
-            metadata_json=json.dumps(details),
+        details = self.tmdb.movie_details(result_list[0]["id"])
+        fallback = parsed.title or file_name
+        entity_id = self._upsert_and_link(
+            media_file_id, details, "movie", "title", "release_date", fallback
         )
-        self.entities_repo.link_file_to_entity(media_file_id, entity_id)
-        log.info("Matched file_id=%d → movie '%s'", media_file_id, details.get("title"))
-        return {"status": "matched", "media_type": "movie", "title": details.get("title")}
+        title = details.get("title")
+        log.info("Matched file_id=%d → movie '%s'", media_file_id, title)
+        return {"status": "matched", "media_type": "movie", "title": title}
+
+    # ------------------------------------------------------------------
+    # TV / episode matching
+    # ------------------------------------------------------------------
 
     def _match_episode(self, media_file_id: int, parsed, file_name: str) -> dict:
         results = self.tmdb.search_tv(parsed.show_title or "")
-        best = (results.get("results") or [None])[0]
-        if not best:
+        result_list = results.get("results") or []
+        if not result_list:
             log.info("No TMDB TV result for '%s'", parsed.show_title)
             return {"status": "unmatched", "reason": "No TV results"}
 
-        details = self.tmdb.tv_details(best["id"])
-        air_date = details.get("first_air_date") or ""
-        entity_id = self.entities_repo.upsert_entity(
-            media_type="show",
-            title=details.get("name") or parsed.show_title or file_name,
-            release_year=int(air_date[:4]) if len(air_date) >= 4 else None,
-            tmdb_id=details.get("id"),
-            plot=details.get("overview"),
-            rating=details.get("vote_average"),
-            genres_json=json.dumps(details.get("genres", [])),
-            poster_path=details.get("poster_path"),
-            metadata_json=json.dumps(details),
+        details = self.tmdb.tv_details(result_list[0]["id"])
+        fallback = parsed.show_title or file_name
+        entity_id = self._upsert_and_link(
+            media_file_id, details, "show", "name", "first_air_date", fallback
         )
-        self.entities_repo.link_file_to_entity(media_file_id, entity_id)
 
         with get_connection() as conn:
             conn.execute(
@@ -119,18 +151,23 @@ class MetadataService:
                 (entity_id, media_file_id, parsed.season_number, parsed.episode_number),
             )
 
+        title = details.get("name")
         log.info(
             "Matched file_id=%d → show '%s' S%02dE%02d",
-            media_file_id, details.get("name"),
+            media_file_id, title,
             parsed.season_number or 0, parsed.episode_number or 0,
         )
         return {
             "status": "matched",
             "media_type": "show",
-            "title": details.get("name"),
+            "title": title,
             "season": parsed.season_number,
             "episode": parsed.episode_number,
         }
+
+    # ------------------------------------------------------------------
+    # Manual / refresh operations
+    # ------------------------------------------------------------------
 
     def manual_match_by_tmdb_id(
         self, media_file_id: int, tmdb_id: int, media_type: str
@@ -142,39 +179,26 @@ class MetadataService:
 
         if media_type == "movie":
             details = self.tmdb.movie_details(tmdb_id)
-            title = details.get("title")
-            release = details.get("release_date") or ""
-            year = int(release[:4]) if len(release) >= 4 else None
+            title_key, date_key = "title", "release_date"
         else:
             details = self.tmdb.tv_details(tmdb_id)
-            title = details.get("name")
-            air_date = details.get("first_air_date") or ""
-            year = int(air_date[:4]) if len(air_date) >= 4 else None
+            title_key, date_key = "name", "first_air_date"
 
-        entity_id = self.entities_repo.upsert_entity(
-            media_type=media_type,
-            title=title or f"TMDB {tmdb_id}",
-            release_year=year,
-            tmdb_id=tmdb_id,
-            plot=details.get("overview"),
-            rating=details.get("vote_average"),
-            genres_json=json.dumps(details.get("genres", [])),
-            poster_path=details.get("poster_path"),
-            metadata_json=json.dumps(details),
+        entity_id = self._upsert_and_link(
+            media_file_id, details, media_type, title_key, date_key,
+            fallback_title=f"TMDB {tmdb_id}",
         )
-        self.entities_repo.link_file_to_entity(media_file_id, entity_id)
+        title = details.get(title_key)
         log.info("Manual match: file_id=%d → %s tmdb_id=%d", media_file_id, media_type, tmdb_id)
         return {"status": "matched", "title": title, "tmdb_id": tmdb_id}
 
     def refresh_entity(self, entity_id: int) -> dict:
         """Re-fetch TMDB metadata for an existing entity and update the DB.
 
-        Used by the "Refresh Metadata" button in MoviesView.
+        Used by the \"Refresh Metadata\" button in MoviesView.
         Returns a dict with 'status', 'title', and 'tmdb_id'.
         Raises ValueError if the entity is not found or has no tmdb_id.
         """
-        import json as _json
-
         with get_connection() as conn:
             row = conn.execute(
                 "SELECT tmdb_id, media_type, title FROM media_entities WHERE id = ?",
@@ -195,25 +219,22 @@ class MetadataService:
             )
 
         if media_type == "movie":
-            details     = self.tmdb.movie_details(tmdb_id)
-            new_title   = details.get("title") or title
-            release     = details.get("release_date") or ""
-            year        = int(release[:4]) if len(release) >= 4 else None
-            rating      = details.get("vote_average")
-            genres_json = _json.dumps(details.get("genres", []))
-            poster      = details.get("poster_path")
-            plot        = details.get("overview")
-            meta_json   = _json.dumps(details)
+            details   = self.tmdb.movie_details(tmdb_id)
+            title_key = "title"
+            date_key  = "release_date"
         else:
-            details     = self.tmdb.tv_details(tmdb_id)
-            new_title   = details.get("name") or title
-            air_date    = details.get("first_air_date") or ""
-            year        = int(air_date[:4]) if len(air_date) >= 4 else None
-            rating      = details.get("vote_average")
-            genres_json = _json.dumps(details.get("genres", []))
-            poster      = details.get("poster_path")
-            plot        = details.get("overview")
-            meta_json   = _json.dumps(details)
+            details   = self.tmdb.tv_details(tmdb_id)
+            title_key = "name"
+            date_key  = "first_air_date"
+
+        new_title   = details.get(title_key) or title
+        date_str    = details.get(date_key) or ""
+        year        = int(date_str[:4]) if len(date_str) >= 4 else None
+        rating      = details.get("vote_average")
+        genres_json = json.dumps(details.get("genres", []))
+        poster      = details.get("poster_path")
+        plot        = details.get("overview")
+        meta_json   = json.dumps(details)
 
         with get_connection() as conn:
             conn.execute(
@@ -229,4 +250,3 @@ class MetadataService:
 
         log.info("Refreshed metadata for entity_id=%d ('%s')", entity_id, new_title)
         return {"status": "refreshed", "title": new_title, "tmdb_id": tmdb_id}
-
