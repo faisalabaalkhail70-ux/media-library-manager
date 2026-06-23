@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
 )
 
+from mlm.__version__ import VERSION
 from mlm.db.repositories.settings_repo import SettingsRepository
 from mlm.ui.styles import get_stylesheet
 from mlm.ui.global_search import GlobalSearchBar
@@ -385,7 +386,7 @@ class MainWindow(QMainWindow):
         self._status_label.setObjectName("status_label")
         sb_lay.addWidget(self._status_label)
         sb_lay.addStretch()
-        sb_lay.addWidget(QLabel("v1.0.0"))
+        sb_lay.addWidget(QLabel(f"v{VERSION}"))
         root.addWidget(status)
 
         self._active_workers = 0
