@@ -1069,3 +1069,7 @@ QLabel#placeholder_sub { color: #c8c8e0; font-size: 13px; background: transparen
 
 def get_stylesheet(theme: str = "dark") -> str:
     return DARK_STYLESHEET if theme.lower() == "dark" else LIGHT_STYLESHEET
+
+
+# Backwards-compatibility alias — bootstrap.py imports APP_STYLESHEET directly
+APP_STYLESHEET = DARK_STYLESHEET
