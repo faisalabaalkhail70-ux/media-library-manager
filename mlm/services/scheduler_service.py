@@ -1,164 +1,184 @@
-"""E-3 Scheduled Tasks — APScheduler wrapper.
+"""E-3 — APScheduler-based task scheduler service.
 
-Provides a singleton BackgroundScheduler whose jobs call into existing
-service layer functions.  The scheduler runs in a daemon background
-thread and never touches the Qt main thread.
+Uses APScheduler's BackgroundScheduler with a SQLAlchemyJobStore backed
+by the app's SQLite database.  All job definitions are also mirrored into
+the ``scheduled_tasks`` table so the UI can read them without touching the
+APScheduler internals.
 
-Job types (task_type strings)
-------------------------------
-  'scan_all'        — re-scan every enabled directory
-  'health_check'    — run HealthService.run_health_scan()
-  'metadata_match'  — match unmatched files via MetadataService
-  'snapshot'        — take a library snapshot via SnapshotService
-  'health_cards'    — regenerate action cards via HealthScoreService
-
-Usage
------
-    from mlm.services.scheduler_service import get_scheduler
-    sched = get_scheduler()
-    sched.start_scheduler()
-    sched.add_interval_job('health_check', interval_minutes=60)
-    sched.add_cron_job('scan_all', cron_expr='0 3 * * *')  # 03:00 daily
+Supported task types
+--------------------
+``scan``          Run a library scan for every enabled directory.
+``health``        Run a health scan of all files.
+``snapshot``      Take a library snapshot.
+``restructure``   Run folder restructuring on all enabled directories.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import Callable
+from datetime import datetime, timezone
+from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.events import (
+    EVENT_JOB_EXECUTED, EVENT_JOB_ERROR, JobExecutionEvent
+)
 
 from mlm.db.connection import get_connection
+from mlm.app.config import AppConfig
 
 log = logging.getLogger(__name__)
 
-# Lazy imports inside job functions to avoid circular imports at module load
-_JOB_REGISTRY: dict[str, Callable] = {}
+_cfg = AppConfig()
+_DB_URL = f"sqlite:///{_cfg.db_path}"
 
 
-def _register() -> None:
-    """Populate _JOB_REGISTRY once, lazily."""
-    if _JOB_REGISTRY:
-        return
+# ---------------------------------------------------------------------------
+# Task callables (run in APScheduler's thread pool)
+# ---------------------------------------------------------------------------
+
+def _task_scan() -> None:
+    """Scan every enabled directory."""
+    from mlm.services.scan_service import ScanService
+    from mlm.db.connection import get_connection as gc
+    with gc() as conn:
+        dirs = conn.execute(
+            "SELECT id, path FROM directories WHERE is_enabled = 1"
+        ).fetchall()
+    svc = ScanService()
+    for row in dirs:
+        try:
+            svc.scan_directory(row["id"], row["path"])
+        except Exception as exc:  # noqa: BLE001
+            log.error("Scheduled scan failed for %s: %s", row["path"], exc)
+
+
+def _task_health() -> None:
     from mlm.services.health_service import HealthService
-    from mlm.services.health_score_service import HealthScoreService
+    HealthService().run_health_scan()
+
+
+def _task_snapshot() -> None:
     from mlm.services.snapshot_service import SnapshotService
-
-    _JOB_REGISTRY["health_check"]   = HealthService().run_health_scan
-    _JOB_REGISTRY["health_cards"]   = HealthScoreService().refresh_action_cards
-    _JOB_REGISTRY["snapshot"]       = lambda: SnapshotService().take_snapshot(label="auto")
-
-    def _scan_all() -> None:
-        from mlm.services.scan_service import ScanService
-        from mlm.db.connection import get_connection as gc
-        svc = ScanService()
-        with gc() as conn:
-            dirs = conn.execute(
-                "SELECT id, path FROM directories WHERE is_enabled=1"
-            ).fetchall()
-        for d in dirs:
-            try:
-                svc.scan_directory(d["id"], d["path"])
-            except Exception as exc:  # noqa: BLE001
-                log.error("Scheduled scan failed for '%s': %s", d["path"], exc)
-
-    _JOB_REGISTRY["scan_all"] = _scan_all
-
-    def _metadata_match() -> None:
-        from mlm.services.metadata_service import MetadataService
-        from mlm.db.connection import get_connection as gc
-        svc = MetadataService()
-        with gc() as conn:
-            rows = conn.execute(
-                "SELECT id FROM media_files WHERE entity_id IS NULL AND removed_at IS NULL"
-            ).fetchall()
-        for row in rows:
-            try:
-                svc.match_file(row["id"])
-            except Exception as exc:  # noqa: BLE001
-                log.warning("Metadata match failed for file_id=%d: %s", row["id"], exc)
-
-    _JOB_REGISTRY["metadata_match"] = _metadata_match
+    label = f"auto-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}"
+    SnapshotService().take_snapshot(label=label)
 
 
-def _run_job(task_type: str, job_id: str) -> None:
-    """Wrapper executed by APScheduler; updates scheduled_tasks table."""
-    _register()
-    fn = _JOB_REGISTRY.get(task_type)
-    if not fn:
-        log.error("Unknown task_type '%s' for job '%s'", task_type, job_id)
-        return
-    now = datetime.utcnow().isoformat()
-    try:
-        log.info("[Scheduler] Starting job '%s' (type=%s)", job_id, task_type)
-        fn()
-        status = "ok"
-        log.info("[Scheduler] Job '%s' completed.", job_id)
-    except Exception as exc:  # noqa: BLE001
-        status = f"error: {exc}"
-        log.error("[Scheduler] Job '%s' failed: %s", job_id, exc, exc_info=True)
-    with get_connection() as conn:
-        conn.execute(
-            "UPDATE scheduled_tasks SET last_run_at=?, last_status=? WHERE job_id=?",
-            (now, status, job_id),
-        )
+def _task_restructure() -> None:
+    from mlm.services.folder_restructure_service import FolderRestructureService
+    from mlm.db.connection import get_connection as gc
+    with gc() as conn:
+        dirs = conn.execute(
+            "SELECT id FROM directories WHERE is_enabled = 1"
+        ).fetchall()
+    svc = FolderRestructureService()
+    for row in dirs:
+        try:
+            svc.restructure_directory(row["id"], dry_run=False)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Scheduled restructure failed for dir %d: %s", row["id"], exc)
 
+
+_TASK_FN = {
+    "scan":        _task_scan,
+    "health":      _task_health,
+    "snapshot":    _task_snapshot,
+    "restructure": _task_restructure,
+}
+
+
+# ---------------------------------------------------------------------------
+# SchedulerService
+# ---------------------------------------------------------------------------
 
 class SchedulerService:
-    """Thin wrapper around APScheduler's BackgroundScheduler."""
+    """Singleton-style wrapper around APScheduler BackgroundScheduler.
+
+    Call ``start()`` once at application startup and ``shutdown()`` at exit.
+    """
 
     def __init__(self) -> None:
-        self._sched = BackgroundScheduler(daemon=True)
-        self._started = False
+        jobstores = {"default": SQLAlchemyJobStore(url=_DB_URL, tablename="apscheduler_jobs")}
+        self._sched = BackgroundScheduler(jobstores=jobstores, timezone="UTC")
+        self._sched.add_listener(self._on_job_event, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def start_scheduler(self) -> None:
-        if not self._started:
+    def start(self) -> None:
+        """Start the scheduler.  Safe to call multiple times."""
+        if not self._sched.running:
+            self._sync_from_db()     # restore user-configured jobs
             self._sched.start()
-            self._started = True
-            log.info("[Scheduler] Started.")
-            self._restore_from_db()
+            log.info("Scheduler started (%d jobs)", len(self._sched.get_jobs()))
 
     def shutdown(self) -> None:
-        if self._started:
+        if self._sched.running:
             self._sched.shutdown(wait=False)
-            self._started = False
-            log.info("[Scheduler] Shut down.")
+            log.info("Scheduler shut down")
 
     # ------------------------------------------------------------------
-    # Job management
+    # Public API
     # ------------------------------------------------------------------
 
     def add_interval_job(
-        self, task_type: str, interval_minutes: int, job_id: str | None = None
+        self,
+        task_type: str,
+        interval_minutes: int,
+        job_id: str | None = None,
     ) -> str:
+        """Add or replace an interval-based job."""
+        if task_type not in _TASK_FN:
+            raise ValueError(f"Unknown task type: {task_type!r}")
         job_id = job_id or f"{task_type}_interval"
+        fn = _TASK_FN[task_type]
         trigger = IntervalTrigger(minutes=interval_minutes)
-        self._upsert_job(job_id, task_type, trigger)
-        self._persist_job(
-            job_id, task_type, interval_min=interval_minutes, cron_expr=None
+        self._sched.add_job(
+            fn, trigger, id=job_id, replace_existing=True,
+            misfire_grace_time=120,
         )
+        self._upsert_db_record(
+            job_id=job_id,
+            task_type=task_type,
+            cron_expr=None,
+            interval_min=interval_minutes,
+        )
+        log.info("Scheduled %s every %d min (id=%s)", task_type, interval_minutes, job_id)
         return job_id
 
     def add_cron_job(
-        self, task_type: str, cron_expr: str, job_id: str | None = None
+        self,
+        task_type: str,
+        cron_expr: str,
+        job_id: str | None = None,
     ) -> str:
-        """*cron_expr* is a 5-field POSIX cron string e.g. '0 3 * * *'."""
-        job_id  = job_id or f"{task_type}_cron"
-        parts   = cron_expr.split()
+        """Add or replace a cron-based job.  *cron_expr* uses 5-field UNIX cron."""
+        if task_type not in _TASK_FN:
+            raise ValueError(f"Unknown task type: {task_type!r}")
+        job_id = job_id or f"{task_type}_cron"
+        fn = _TASK_FN[task_type]
+        parts = cron_expr.split()
+        if len(parts) != 5:
+            raise ValueError(f"cron_expr must have 5 fields, got: {cron_expr!r}")
+        minute, hour, day, month, day_of_week = parts
         trigger = CronTrigger(
-            minute=parts[0], hour=parts[1],
-            day=parts[2],    month=parts[3], day_of_week=parts[4],
+            minute=minute, hour=hour, day=day,
+            month=month, day_of_week=day_of_week,
         )
-        self._upsert_job(job_id, task_type, trigger)
-        self._persist_job(
-            job_id, task_type, interval_min=None, cron_expr=cron_expr
+        self._sched.add_job(
+            fn, trigger, id=job_id, replace_existing=True,
+            misfire_grace_time=120,
         )
+        self._upsert_db_record(
+            job_id=job_id,
+            task_type=task_type,
+            cron_expr=cron_expr,
+            interval_min=None,
+        )
+        log.info("Scheduled %s cron=%r (id=%s)", task_type, cron_expr, job_id)
         return job_id
 
     def remove_job(self, job_id: str) -> None:
@@ -167,76 +187,124 @@ class SchedulerService:
         except Exception:  # noqa: BLE001
             pass
         with get_connection() as conn:
+            conn.execute("DELETE FROM scheduled_tasks WHERE job_id = ?", (job_id,))
+
+    def enable_job(self, job_id: str) -> None:
+        self._sched.resume_job(job_id)
+        with get_connection() as conn:
             conn.execute(
-                "UPDATE scheduled_tasks SET is_enabled=0 WHERE job_id=?", (job_id,)
+                "UPDATE scheduled_tasks SET is_enabled = 1 WHERE job_id = ?",
+                (job_id,),
             )
 
-    def list_jobs(self) -> list[dict]:
+    def disable_job(self, job_id: str) -> None:
+        self._sched.pause_job(job_id)
         with get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM scheduled_tasks ORDER BY task_type"
-            ).fetchall()
-        return [dict(r) for r in rows]
+            conn.execute(
+                "UPDATE scheduled_tasks SET is_enabled = 0 WHERE job_id = ?",
+                (job_id,),
+            )
+
+    def list_jobs(self) -> list[dict[str, Any]]:
+        """Return UI-friendly job rows merged from APScheduler + DB."""
+        with get_connection() as conn:
+            db_rows = {
+                r["job_id"]: dict(r)
+                for r in conn.execute("SELECT * FROM scheduled_tasks").fetchall()
+            }
+        jobs = []
+        for job in self._sched.get_jobs():
+            db_r = db_rows.get(job.id, {})
+            next_run = job.next_run_time
+            jobs.append({
+                "job_id":       job.id,
+                "task_type":    db_r.get("task_type", "unknown"),
+                "cron_expr":    db_r.get("cron_expr"),
+                "interval_min": db_r.get("interval_min"),
+                "is_enabled":   db_r.get("is_enabled", 1),
+                "last_run_at":  db_r.get("last_run_at"),
+                "last_status":  db_r.get("last_status"),
+                "next_run_at":  next_run.isoformat() if next_run else None,
+            })
+        return jobs
+
+    def run_now(self, job_id: str) -> None:
+        """Execute a job immediately (bypasses trigger)."""
+        job = self._sched.get_job(job_id)
+        if job is None:
+            raise KeyError(f"Job not found: {job_id!r}")
+        job.func()
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _upsert_job(self, job_id: str, task_type: str, trigger) -> None:
-        if self._sched.get_job(job_id):
-            self._sched.remove_job(job_id)
-        self._sched.add_job(
-            _run_job, trigger,
-            args=[task_type, job_id],
-            id=job_id,
-            replace_existing=True,
-            misfire_grace_time=120,
-        )
+    def _on_job_event(self, event: JobExecutionEvent) -> None:
+        status = "error" if event.exception else "ok"
+        now = datetime.now(timezone.utc).isoformat()
+        job = self._sched.get_job(event.job_id)
+        next_run = job.next_run_time.isoformat() if (job and job.next_run_time) else None
+        try:
+            with get_connection() as conn:
+                conn.execute(
+                    "UPDATE scheduled_tasks "
+                    "SET last_run_at=?, last_status=?, next_run_at=? "
+                    "WHERE job_id=?",
+                    (now, status, next_run, event.job_id),
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to update job status in DB: %s", exc)
+        if event.exception:
+            log.error("Scheduled job %s failed: %s", event.job_id, event.exception)
 
-    def _persist_job(
+    def _upsert_db_record(
         self,
         job_id: str,
         task_type: str,
-        interval_min: int | None,
         cron_expr: str | None,
+        interval_min: int | None,
     ) -> None:
+        job = self._sched.get_job(job_id)
+        next_run = job.next_run_time.isoformat() if (job and job.next_run_time) else None
         with get_connection() as conn:
             conn.execute(
                 """
-                INSERT INTO scheduled_tasks (job_id, task_type, cron_expr, interval_min, is_enabled)
-                VALUES (?, ?, ?, ?, 1)
+                INSERT INTO scheduled_tasks
+                    (job_id, task_type, cron_expr, interval_min, is_enabled,
+                     next_run_at, created_at)
+                VALUES (?, ?, ?, ?, 1, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(job_id) DO UPDATE SET
                     task_type    = excluded.task_type,
                     cron_expr    = excluded.cron_expr,
                     interval_min = excluded.interval_min,
-                    is_enabled   = 1
+                    is_enabled   = 1,
+                    next_run_at  = excluded.next_run_at
                 """,
-                (job_id, task_type, cron_expr, interval_min),
+                (job_id, task_type, cron_expr, interval_min, next_run),
             )
 
-    def _restore_from_db(self) -> None:
-        """Re-register any enabled jobs persisted from a previous session."""
-        rows = self.list_jobs()
-        for r in rows:
-            if not r["is_enabled"]:
-                continue
+    def _sync_from_db(self) -> None:
+        """Re-register enabled jobs from the DB after a restart."""
+        with get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scheduled_tasks WHERE is_enabled = 1"
+            ).fetchall()
+        for row in rows:
             try:
-                if r["cron_expr"]:
-                    self.add_cron_job(r["task_type"], r["cron_expr"], r["job_id"])
-                elif r["interval_min"]:
-                    self.add_interval_job(
-                        r["task_type"], r["interval_min"], r["job_id"]
-                    )
+                if row["cron_expr"]:
+                    self.add_cron_job(row["task_type"], row["cron_expr"], job_id=row["job_id"])
+                elif row["interval_min"]:
+                    self.add_interval_job(row["task_type"], row["interval_min"], job_id=row["job_id"])
             except Exception as exc:  # noqa: BLE001
-                log.warning("Could not restore job '%s': %s", r["job_id"], exc)
+                log.warning("Could not restore job %s: %s", row["job_id"], exc)
 
 
-# Module-level singleton -------------------------------------------------
+# Module-level singleton — import and call start() once.
 _instance: SchedulerService | None = None
 
 
 def get_scheduler() -> SchedulerService:
-    global _instance
+    global _instance  # noqa: PLW0603
     if _instance is None:
         _instance = SchedulerService()
     return _instance
