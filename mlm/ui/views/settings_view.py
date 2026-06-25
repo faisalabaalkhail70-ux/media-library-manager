@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import subprocess
+import threading
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
@@ -39,19 +40,33 @@ class _CheckWorker(QThread):
 
 
 class _DownloadWorker(QThread):
-    """Streams the zip and extracts it, reporting progress."""
+    """Streams the zip and extracts it, reporting progress.
+
+    Supports cooperative cancellation via a threading.Event flag.
+    Call cancel() to request a stop; the worker exits cleanly at the
+    next chunk boundary and emits failed() with a cancellation message.
+    """
     progress    = Signal(int, int)   # bytes_done, total_bytes
     finished_ok = Signal()
     failed      = Signal(str)
 
     def __init__(self, zip_url: str) -> None:
         super().__init__()
-        self._zip_url = zip_url
+        self._zip_url    = zip_url
+        self._cancel_flag = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cancellation. The worker will stop at the next chunk read."""
+        self._cancel_flag.set()
 
     def run(self) -> None:
         try:
-            from mlm.services.updater_service import download_and_install
-            download_and_install(self._zip_url, progress_cb=self.progress.emit)
+            from mlm.services.updater_service import download_and_install, DownloadCancelled
+            download_and_install(
+                self._zip_url,
+                progress_cb=self.progress.emit,
+                cancel_flag=self._cancel_flag,
+            )
             self.finished_ok.emit()
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
@@ -72,7 +87,7 @@ class _RestartDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setSpacing(12)
 
-        icon_lbl = QLabel("✅  Update installed successfully!")
+        icon_lbl = QLabel("\u2705  Update installed successfully!")
         icon_lbl.setStyleSheet("font-size: 14px; color: #81c784; font-weight: bold;")
         lay.addWidget(icon_lbl)
 
@@ -87,7 +102,7 @@ class _RestartDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        restart_btn = QPushButton("🔄  Restart Now")
+        restart_btn = QPushButton("\U0001f504  Restart Now")
         restart_btn.setObjectName("primary")
         restart_btn.setFixedHeight(34)
         restart_btn.clicked.connect(self._restart_app)
@@ -104,7 +119,6 @@ class _RestartDialog(QDialog):
     @staticmethod
     def _restart_app() -> None:
         """Re-launch the current process and exit cleanly."""
-        # Re-launch using the same Python interpreter and arguments
         subprocess.Popen([sys.executable] + sys.argv)
         QApplication.instance().quit()
 
@@ -172,10 +186,15 @@ class _UpdateDialog(QDialog):
         lay.addLayout(btn_row)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        """Ensure download thread is stopped if dialog is closed mid-download."""
+        """Cancel and wait for the download worker before closing.
+
+        QThread.quit() has no effect on a thread running a blocking loop.
+        Instead we set the cooperative cancel flag and wait up to 5 seconds
+        for the worker to exit cleanly at the next chunk boundary.
+        """
         if self._worker and self._worker.isRunning():
-            self._worker.quit()
-            self._worker.wait(3000)
+            self._worker.cancel()      # set threading.Event to stop read loop
+            self._worker.wait(5000)    # give it up to 5 s to exit cleanly
         super().closeEvent(event)
 
     def _start_download(self) -> None:
@@ -201,7 +220,6 @@ class _UpdateDialog(QDialog):
     def _on_done(self) -> None:
         self._progress.setValue(100)
         self._status.setText("")
-        # Close the download dialog first, then show the restart prompt
         self.accept()
         dlg = _RestartDialog(self.parent())
         dlg.exec()
@@ -310,7 +328,7 @@ class SettingsView(QWidget):
         layout.addStretch()
         self._load_settings()
 
-    # \u2500\u2500 Update logic \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # \u2500\u2500 Update logic ────────────────────────────────────────────────────────────────────
 
     def _check_updates(self) -> None:
         if self._check_worker and self._check_worker.isRunning():
@@ -340,7 +358,7 @@ class SettingsView(QWidget):
         self._update_status.setText(f"\u274c  Check failed: {msg}")
         self._update_status.setStyleSheet("color: #ef9a9a;")
 
-    # \u2500\u2500 Settings logic \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+    # \u2500\u2500 Settings logic ────────────────────────────────────────────────────────────────────
 
     def _load_settings(self) -> None:
         self.tmdb_key.setText(self.settings.get("tmdb_api_key", ""))

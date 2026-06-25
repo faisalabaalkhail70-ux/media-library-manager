@@ -3,10 +3,11 @@
 Flow
 ----
 1. GET https://api.github.com/repos/{OWNER}/{REPO}/releases/latest
+   (with optional GitHub token for authenticated requests)
 2. Compare tag_name (e.g. 'v1.2.0') against mlm.__version__.VERSION
-3. If newer:  return release metadata dict
+3. If newer:  return release metadata dict with a fully-resolved direct zip URL
    If same/older: return None
-4. download_and_install(asset_url, dest_dir) — streams the zip into a staging
+4. download_and_install(zip_url, dest_dir) — streams the zip into a staging
    directory, validates it, then copies over the live app atomically.
    If anything fails mid-way the live app is never touched.
 
@@ -19,9 +20,10 @@ import json
 import logging
 import os
 import shutil
-import sys
 import tempfile
+import threading
 import urllib.request
+import urllib.error
 import zipfile
 from typing import Callable
 
@@ -32,9 +34,55 @@ REPO  = "media-library-manager"
 _API  = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
 _UA   = "MediaLibraryManager-Updater/1.0"
 
+# Timeout (seconds) for the initial API/header request
+CONNECT_TIMEOUT = 10
+# Timeout (seconds) for the streaming zip download
+READ_TIMEOUT = 300
+
+
+class DownloadCancelled(Exception):
+    """Raised when the download is cancelled via the cancel flag."""
+
+
+def _make_headers() -> dict[str, str]:
+    """Build request headers, attaching a GitHub token when one is saved.
+
+    The token is read from the DB settings table under the key
+    'github_token'.  If no token is stored the headers fall back to
+    unauthenticated (60 req/hr API limit — sufficient for update checks,
+    but a token is recommended for reliable asset downloads).
+    """
+    headers: dict[str, str] = {"User-Agent": _UA}
+    try:
+        from mlm.db.repositories.settings_repo import SettingsRepository
+        token = SettingsRepository().get("github_token", "").strip()
+        if token:
+            headers["Authorization"] = f"token {token}"
+    except Exception:  # noqa: BLE001
+        pass  # DB not ready yet — skip auth silently
+    return headers
+
+
+def _resolve_download_url(url: str) -> str:
+    """Follow redirects and return the final direct download URL.
+
+    GitHub's zipball_url and browser_download_url both go through the
+    API or CDN redirect layer.  urllib follows HTTP 301/302 automatically,
+    but HTTP 300 (Multiple Choices) is not auto-followed.  By opening the
+    URL and reading resp.url we always get the final resolved location
+    regardless of how many hops it takes.
+
+    The response body is NOT read here — we just resolve the URL and close
+    the connection immediately so the actual streaming happens in one clean
+    request to the CDN.
+    """
+    req = urllib.request.Request(url, headers=_make_headers())
+    with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT) as resp:
+        return resp.url  # final URL after all redirects
+
 
 def _parse_version(tag: str) -> tuple[int, ...]:
-    """'v1.2.3' or '1.2.3' → (1, 2, 3)"""
+    """'v1.2.3' or '1.2.3' -> (1, 2, 3)"""
     clean = tag.lstrip("v").strip()
     try:
         return tuple(int(x) for x in clean.split("."))
@@ -47,11 +95,14 @@ def check_for_update() -> dict | None:
 
     Raises urllib.error.URLError / OSError on network failure — callers
     should catch and surface as a user-friendly message.
+
+    The returned 'zip_url' is always a fully-resolved direct CDN URL so
+    the downloader never has to deal with API redirects.
     """
     from mlm.__version__ import VERSION
 
-    req = urllib.request.Request(_API, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    req = urllib.request.Request(_API, headers=_make_headers())
+    with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT) as resp:
         data = json.loads(resp.read().decode())
 
     latest_tag  = data.get("tag_name", "")
@@ -61,12 +112,18 @@ def check_for_update() -> dict | None:
     if latest_ver <= current_ver:
         return None
 
-    # Find the zip asset (prefer the source-code zip GitHub auto-generates)
-    zip_url = data.get("zipball_url", "")
+    # Prefer a manually uploaded .zip asset; fall back to GitHub's auto-
+    # generated zipball.  Either way, resolve redirects NOW so the worker
+    # always receives a plain CDN URL with no further redirect surprises.
+    raw_zip_url = data.get("zipball_url", "")
     for asset in data.get("assets", []):
         if asset.get("name", "").endswith(".zip"):
-            zip_url = asset["browser_download_url"]
+            raw_zip_url = asset["browser_download_url"]
             break
+
+    # Resolve the final direct URL at check time (fails fast here rather
+    # than surprising the user mid-download).
+    zip_url = _resolve_download_url(raw_zip_url)
 
     return {
         "tag":      latest_tag,
@@ -81,6 +138,7 @@ def download_and_install(
     zip_url: str,
     dest_dir: str | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
+    cancel_flag: threading.Event | None = None,
 ) -> None:
     """Download *zip_url* and safely extract it over *dest_dir*.
 
@@ -90,17 +148,19 @@ def download_and_install(
 
     Parameters
     ----------
-    zip_url:     Direct URL to the zip archive.
-    dest_dir:    Root folder of the running application.  Defaults to the
-                 directory that contains this file's package (two levels up).
-    progress_cb: Optional callable(bytes_done, total_bytes) for progress UI.
+    zip_url:      Direct CDN URL to the zip archive (pre-resolved, no redirects).
+    dest_dir:     Root folder of the running application.  Defaults to the
+                  directory that contains this file's package (two levels up).
+    progress_cb:  Optional callable(bytes_done, total_bytes) for progress UI.
+    cancel_flag:  Optional threading.Event; when set the download loop raises
+                  DownloadCancelled so the worker can exit cleanly.
     """
     if dest_dir is None:
-        # mlm/services/ → mlm/ → app_root/
+        # mlm/services/ -> mlm/ -> app_root/
         dest_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         dest_dir = os.path.dirname(dest_dir)
 
-    req = urllib.request.Request(zip_url, headers={"User-Agent": _UA})
+    req = urllib.request.Request(zip_url, headers=_make_headers())
 
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp_path = tmp.name
@@ -110,12 +170,14 @@ def download_and_install(
 
     try:
         # ── Step 1: stream download ──────────────────────────────────────────
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=READ_TIMEOUT) as resp:
             total = int(resp.headers.get("Content-Length") or 0)
             done  = 0
             chunk = 65536
             with open(tmp_path, "wb") as f:
                 while True:
+                    if cancel_flag and cancel_flag.is_set():
+                        raise DownloadCancelled("Download cancelled by user.")
                     buf = resp.read(chunk)
                     if not buf:
                         break
@@ -159,7 +221,7 @@ def download_and_install(
                 "update aborted to protect the running application."
             )
 
-        # ── Step 4: copy staging → live app ──────────────────────────────────
+        # ── Step 4: copy staging -> live app ─────────────────────────────────
         for root, dirs, files in os.walk(staging_dir):
             rel_root = os.path.relpath(root, staging_dir)
             for fname in files:
@@ -171,7 +233,6 @@ def download_and_install(
         log.info("Update successfully installed from %s", zip_url)
 
     finally:
-        # Always clean up temp files regardless of success or failure
         try:
             os.unlink(tmp_path)
         except OSError:
