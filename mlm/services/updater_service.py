@@ -21,7 +21,6 @@ import os
 import shutil
 import sys
 import tempfile
-import urllib.error
 import urllib.request
 import zipfile
 from typing import Callable
@@ -43,34 +42,6 @@ def _parse_version(tag: str) -> tuple[int, ...]:
         return (0,)
 
 
-def _resolve_url(url: str, max_hops: int = 10) -> str:
-    """Follow redirects manually and return the final resolved URL.
-
-    urllib.request.urlopen *does* follow 302 redirects automatically, but
-    GitHub's /zipball/<ref> endpoint can return 300 (Multiple Choices) when
-    the ref is ambiguous.  By resolving the URL ourselves with HEAD requests
-    we pin to the exact final download URL before streaming, avoiding the
-    300 entirely.
-    """
-    current = url
-    for _ in range(max_hops):
-        req = urllib.request.Request(current, method="HEAD", headers={"User-Agent": _UA})
-        try:
-            # unredirected_hdrs lets us catch 3xx before urllib follows them
-            opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
-            with opener.open(req, timeout=15) as resp:
-                # If we get here without redirect it's the final URL
-                return current
-        except urllib.error.HTTPError as exc:
-            if exc.code in (301, 302, 303, 307, 308):
-                location = exc.headers.get("Location")
-                if location:
-                    current = location
-                    continue
-            raise
-    return current  # return best-effort if hop limit reached
-
-
 def check_for_update() -> dict | None:
     """Return release metadata dict if a newer version exists, else None.
 
@@ -90,22 +61,12 @@ def check_for_update() -> dict | None:
     if latest_ver <= current_ver:
         return None
 
-    # Preference order for the download URL:
-    #  1. A named .zip release asset attached to the release (most reliable)
-    #  2. A direct /zipball/<exact-tag> URL (avoids ambiguous ref resolution)
-    #  3. The raw zipball_url from the API response (last resort)
-    zip_url = ""
-
+    # Find the zip asset (prefer the source-code zip GitHub auto-generates)
+    zip_url = data.get("zipball_url", "")
     for asset in data.get("assets", []):
         if asset.get("name", "").endswith(".zip"):
             zip_url = asset["browser_download_url"]
             break
-
-    if not zip_url:
-        # Build an unambiguous zipball URL using the exact tag name
-        zip_url = (
-            f"https://api.github.com/repos/{OWNER}/{REPO}/zipball/{latest_tag}"
-        )
 
     return {
         "tag":      latest_tag,
@@ -139,20 +100,7 @@ def download_and_install(
         dest_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         dest_dir = os.path.dirname(dest_dir)
 
-    # Resolve any redirect chain before streaming so we never hit a 300/302
-    # mid-download which would corrupt the partially-written temp file.
-    resolved_url = _resolve_url(zip_url)
-    log.debug("Resolved download URL: %s → %s", zip_url, resolved_url)
-
-    req = urllib.request.Request(
-        resolved_url,
-        headers={
-            "User-Agent": _UA,
-            # Required for the GitHub API zipball endpoint to return the zip
-            # directly rather than a redirect to codeload.github.com
-            "Accept": "application/octet-stream",
-        },
-    )
+    req = urllib.request.Request(zip_url, headers={"User-Agent": _UA})
 
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp_path = tmp.name
