@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import sys
+import subprocess
+
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QFormLayout,
@@ -54,6 +58,58 @@ class _DownloadWorker(QThread):
 
 
 # ──────────────────────────────────────────────────────────────────────────────────
+# "Restart required" dialog  (shown after a successful install)
+# ──────────────────────────────────────────────────────────────────────────────────
+
+class _RestartDialog(QDialog):
+    """Asks the user to restart immediately or later."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Restart Required")
+        self.setMinimumWidth(400)
+
+        lay = QVBoxLayout(self)
+        lay.setSpacing(12)
+
+        icon_lbl = QLabel("✅  Update installed successfully!")
+        icon_lbl.setStyleSheet("font-size: 14px; color: #81c784; font-weight: bold;")
+        lay.addWidget(icon_lbl)
+
+        msg = QLabel(
+            "The update has been downloaded and applied.\n"
+            "A restart is required for the changes to take effect."
+        )
+        msg.setWordWrap(True)
+        msg.setStyleSheet("color: #b0b0c8; font-size: 12px;")
+        lay.addWidget(msg)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        restart_btn = QPushButton("🔄  Restart Now")
+        restart_btn.setObjectName("primary")
+        restart_btn.setFixedHeight(34)
+        restart_btn.clicked.connect(self._restart_app)
+
+        later_btn = QPushButton("Later")
+        later_btn.setFixedHeight(34)
+        later_btn.clicked.connect(self.accept)
+
+        btn_row.addWidget(restart_btn)
+        btn_row.addWidget(later_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+    @staticmethod
+    def _restart_app() -> None:
+        """Re-launch the current process and exit cleanly."""
+        # Re-launch using the same Python interpreter and arguments
+        subprocess.Popen([sys.executable] + sys.argv)
+        QApplication.instance().quit()
+
+
+# ──────────────────────────────────────────────────────────────────────────────────
 # "Update available" dialog
 # ──────────────────────────────────────────────────────────────────────────────────
 
@@ -62,7 +118,7 @@ class _UpdateDialog(QDialog):
 
     def __init__(self, release: dict, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Update Available — {release['name']}")
+        self.setWindowTitle(f"Update Available \u2014 {release['name']}")
         self.setMinimumWidth(520)
         self._release   = release
         self._worker: _DownloadWorker | None = None
@@ -71,7 +127,7 @@ class _UpdateDialog(QDialog):
         lay.setSpacing(10)
 
         # Header
-        hdr = QLabel(f"🎉  Version <b>{release['tag']}</b> is available!")
+        hdr = QLabel(f"\U0001f389  Version <b>{release['tag']}</b> is available!")
         hdr.setStyleSheet("font-size: 14px; color: #81c784; padding: 4px 0;")
         lay.addWidget(hdr)
 
@@ -102,7 +158,7 @@ class _UpdateDialog(QDialog):
         lay.addWidget(self._status)
 
         # Buttons
-        self._install_btn = QPushButton("⬇️  Download & Install")
+        self._install_btn = QPushButton("\u2b07\ufe0f  Download & Install")
         self._install_btn.setObjectName("primary")
         self._install_btn.clicked.connect(self._start_download)
 
@@ -115,7 +171,6 @@ class _UpdateDialog(QDialog):
         btn_row.addStretch()
         lay.addLayout(btn_row)
 
-
     def closeEvent(self, event) -> None:  # noqa: N802
         """Ensure download thread is stopped if dialog is closed mid-download."""
         if self._worker and self._worker.isRunning():
@@ -126,7 +181,7 @@ class _UpdateDialog(QDialog):
     def _start_download(self) -> None:
         self._install_btn.setEnabled(False)
         self._progress.setVisible(True)
-        self._status.setText("Downloading update…")
+        self._status.setText("Downloading update\u2026")
 
         self._worker = _DownloadWorker(self._release["zip_url"])
         self._worker.progress.connect(self._on_progress)
@@ -139,22 +194,17 @@ class _UpdateDialog(QDialog):
             self._progress.setRange(0, 100)
             self._progress.setValue(int(done / total * 100))
         else:
-            # Unknown total length — show indeterminate pulse
             self._progress.setRange(0, 0)
         mb = done / (1024 * 1024)
-        self._status.setText(f"Downloading… {mb:.1f} MB")
+        self._status.setText(f"Downloading\u2026 {mb:.1f} MB")
 
     def _on_done(self) -> None:
         self._progress.setValue(100)
         self._status.setText("")
-        reply = QMessageBox.information(
-            self,
-            "Update Installed",
-            "Update downloaded and installed successfully!\n\n"
-            "Please restart the application for changes to take effect.",
-            QMessageBox.Ok,
-        )
+        # Close the download dialog first, then show the restart prompt
         self.accept()
+        dlg = _RestartDialog(self.parent())
+        dlg.exec()
 
     def _on_failed(self, msg: str) -> None:
         self._install_btn.setEnabled(True)
@@ -181,7 +231,7 @@ class SettingsView(QWidget):
         title.setObjectName("h1")
         layout.addWidget(title)
 
-        # ── API / Integration
+        # \u2500\u2500 API / Integration
         api_group = QGroupBox("API & Integration")
         api_form = QFormLayout(api_group)
 
@@ -209,7 +259,7 @@ class SettingsView(QWidget):
         api_form.addRow("Rename Template:", self.rename_template)
         layout.addWidget(api_group)
 
-        # ── Appearance
+        # \u2500\u2500 Appearance
         appear_group = QGroupBox("Appearance")
         appear_form = QFormLayout(appear_group)
 
@@ -223,7 +273,7 @@ class SettingsView(QWidget):
         appear_form.addRow("Row Density:", self.density_combo)
         layout.addWidget(appear_group)
 
-        # ── Updates
+        # \u2500\u2500 Updates
         update_group = QGroupBox("Application Updates")
         update_layout = QVBoxLayout(update_group)
         update_layout.setSpacing(8)
@@ -237,7 +287,7 @@ class SettingsView(QWidget):
         update_layout.addLayout(ver_row)
 
         btn_row = QHBoxLayout()
-        self._check_btn = QPushButton("🔄  Check for Updates")
+        self._check_btn = QPushButton("\U0001f504  Check for Updates")
         self._check_btn.setObjectName("primary")
         self._check_btn.setFixedWidth(200)
         self._check_btn.clicked.connect(self._check_updates)
@@ -251,7 +301,7 @@ class SettingsView(QWidget):
 
         layout.addWidget(update_group)
 
-        # ── Save
+        # \u2500\u2500 Save
         self.save_btn = QPushButton("Save Settings")
         self.save_btn.setObjectName("primary")
         self.save_btn.clicked.connect(self.save_settings)
@@ -260,13 +310,13 @@ class SettingsView(QWidget):
         layout.addStretch()
         self._load_settings()
 
-    # ── Update logic ──────────────────────────────────────────────────────────────────────
+    # \u2500\u2500 Update logic \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
     def _check_updates(self) -> None:
         if self._check_worker and self._check_worker.isRunning():
             return
         self._check_btn.setEnabled(False)
-        self._update_status.setText("Checking…")
+        self._update_status.setText("Checking\u2026")
         self._update_status.setStyleSheet("color: #9e9e9e;")
 
         self._check_worker = _CheckWorker()
@@ -277,25 +327,20 @@ class SettingsView(QWidget):
         self._check_worker.start()
 
     def _on_update_found(self, release: dict) -> None:
-        self._update_status.setText(
-            f"⬆️  {release['tag']} available"
-        )
+        self._update_status.setText(f"\u2b06\ufe0f  {release['tag']} available")
         self._update_status.setStyleSheet("color: #81c784; font-weight: bold;")
         dlg = _UpdateDialog(release, parent=self)
         dlg.exec()
-        # After install, re-read version label (user may have restarted manually)
-        self._update_status.setText("Restart the app to apply the update.")
-        self._update_status.setStyleSheet("color: #fff176;")
 
     def _on_up_to_date(self) -> None:
-        self._update_status.setText("✅  You’re up to date!")
+        self._update_status.setText("\u2705  You're up to date!")
         self._update_status.setStyleSheet("color: #81c784;")
 
     def _on_check_failed(self, msg: str) -> None:
-        self._update_status.setText(f"❌  Check failed: {msg}")
+        self._update_status.setText(f"\u274c  Check failed: {msg}")
         self._update_status.setStyleSheet("color: #ef9a9a;")
 
-    # ── Settings logic ───────────────────────────────────────────────────────────────────
+    # \u2500\u2500 Settings logic \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
     def _load_settings(self) -> None:
         self.tmdb_key.setText(self.settings.get("tmdb_api_key", ""))
@@ -310,7 +355,6 @@ class SettingsView(QWidget):
 
         density = self.settings.get("ui_row_density", "comfortable")
         self.density_combo.setCurrentIndex(0 if density == "comfortable" else 1)
-
 
     def closeEvent(self, event) -> None:  # noqa: N802
         """Stop any running workers before the widget is destroyed."""
