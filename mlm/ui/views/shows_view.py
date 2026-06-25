@@ -2,9 +2,9 @@ import json
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
     QTableView, QLineEdit, QAbstractItemView, QStackedWidget,
-    QStyledItemDelegate, QStyleOptionViewItem, QApplication,
+    QStyledItemDelegate, QStyleOptionViewItem, QApplication, QStyle,
 )
-from PySide6.QtCore import Qt, QSortFilterProxyModel
+from PySide6.QtCore import Qt, QSortFilterProxyModel, QRect
 from PySide6.QtGui import QColor, QPalette
 from mlm.db.connection import get_connection
 from mlm.ui.models.shows_model import ShowsTableModel
@@ -19,23 +19,46 @@ from mlm.workers.episode_worker import EpisodeWorker
 
 
 class _ColorDelegate(QStyledItemDelegate):
-    """Delegate that forces the model's ForegroundRole colour to be painted
-    regardless of any QSS colour rules on the view.
+    """Draws cell text using the model's ForegroundRole color directly
+    via QPainter.setPen(), which is immune to QSS stylesheet overrides.
 
-    Qt stylesheets set a palette colour that wins over model ForegroundRole
-    in the default delegate.  By overriding initStyleOption we inject the
-    model colour directly into the option's palette so it is guaranteed to
-    be used when the style draws the text.
+    Strategy:
+      1. Call super().paint() with the display text blanked out so the
+         style draws the background, selection highlight, and focus rect
+         as normal.
+      2. Then manually draw the text with the correct color pen.
     """
 
-    def initStyleOption(self, option: QStyleOptionViewItem, index) -> None:
-        super().initStyleOption(option, index)
+    def paint(self, painter, option, index) -> None:
+        # Grab the text and color BEFORE super() mutates anything
+        text  = index.data(Qt.DisplayRole) or ""
         color = index.data(Qt.ForegroundRole)
-        if isinstance(color, QColor) and color.isValid():
-            palette = option.palette
-            palette.setColor(QPalette.ColorRole.Text, color)
-            palette.setColor(QPalette.ColorRole.HighlightedText, color)
-            option.palette = palette
+        align = index.data(Qt.TextAlignmentRole)
+
+        # Let Qt draw background / selection / focus rect normally,
+        # but suppress the text so it does not paint over ours.
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ""  # suppress Qt's own text draw
+        QApplication.style().drawControl(QStyle.CE_ItemViewItem, opt, painter)
+
+        # Now draw the text ourselves with the exact model color
+        if text:
+            if isinstance(color, QColor) and color.isValid():
+                painter.setPen(color)
+            else:
+                # Fallback: use the palette's normal text color
+                painter.setPen(option.palette.color(QPalette.ColorRole.Text))
+
+            # Honour the alignment from the model (center / left)
+            if align is not None:
+                qt_align = Qt.AlignmentFlag(int(align))
+            else:
+                qt_align = Qt.AlignVCenter | Qt.AlignLeft
+
+            # Inner rect with a small horizontal padding
+            rect = option.rect.adjusted(4, 0, -4, 0)
+            painter.drawText(rect, int(qt_align), str(text))
 
 
 class ShowsView(QWidget):
@@ -72,13 +95,13 @@ class ShowsView(QWidget):
         self.check_btn.setObjectName("primary")
         self.check_btn.clicked.connect(self._check_missing)
 
-        col_btn = QPushButton("\u2699 Columns")
+        col_btn = QPushButton("⚙ Columns")
         col_btn.clicked.connect(self._open_col_dialog)
 
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.load_rows)
 
-        self._view_toggle = QPushButton("\u22f9 Grid View")
+        self._view_toggle = QPushButton("⋹ Grid View")
         self._view_toggle.setCheckable(True)
         self._view_toggle.clicked.connect(self._toggle_view)
 
@@ -113,8 +136,6 @@ class ShowsView(QWidget):
         self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setSortIndicatorShown(True)
         self.table.doubleClicked.connect(self._open_episode_detail)
-        # Install the colour delegate so stylesheet rules cannot override
-        # the semantic green/red/amber colours from ShowsTableModel.
         self.table.setItemDelegate(_ColorDelegate(self.table))
         self._stack.addWidget(self.table)
 
@@ -190,7 +211,7 @@ class ShowsView(QWidget):
     def _toggle_view(self) -> None:
         is_grid = self._view_toggle.isChecked()
         self._stack.setCurrentIndex(1 if is_grid else 0)
-        self._view_toggle.setText("\u2630 List View" if is_grid else "\u22f9 Grid View")
+        self._view_toggle.setText("☰ List View" if is_grid else "⋹ Grid View")
 
     def _open_entity_detail(self, entity_id: int) -> None:
         self._entity_detail = EntityDetailPanel(entity_id, parent=self)
