@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QStyledItemDelegate, QStyleOptionViewItem, QApplication,
 )
 from PySide6.QtCore import Qt, QSortFilterProxyModel
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QPalette
 from mlm.db.connection import get_connection
 from mlm.ui.models.shows_model import ShowsTableModel
 from mlm.ui.column_visibility import (
@@ -33,8 +33,8 @@ class _ColorDelegate(QStyledItemDelegate):
         color = index.data(Qt.ForegroundRole)
         if isinstance(color, QColor) and color.isValid():
             palette = option.palette
-            palette.setColor(palette.Text, color)
-            palette.setColor(palette.HighlightedText, color)
+            palette.setColor(QPalette.ColorRole.Text, color)
+            palette.setColor(QPalette.ColorRole.HighlightedText, color)
             option.palette = palette
 
 
