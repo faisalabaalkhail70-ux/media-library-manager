@@ -42,6 +42,17 @@ def _parse_version(tag: str) -> tuple[int, ...]:
         return (0,)
 
 
+def _codeload_url(tag: str) -> str:
+    """Return a direct codeload.github.com zip URL for the given tag.
+
+    This bypasses the api.github.com/repos/.../zipball endpoint which
+    requires authentication and returns HTTP 300 for unauthenticated
+    requests.  codeload.github.com is the CDN that GitHub uses for all
+    source-archive downloads and works without any token.
+    """
+    return f"https://codeload.github.com/{OWNER}/{REPO}/zip/refs/tags/{tag}"
+
+
 def check_for_update() -> dict | None:
     """Return release metadata dict if a newer version exists, else None.
 
@@ -61,8 +72,10 @@ def check_for_update() -> dict | None:
     if latest_ver <= current_ver:
         return None
 
-    # Find the zip asset (prefer the source-code zip GitHub auto-generates)
-    zip_url = data.get("zipball_url", "")
+    # Preference order:
+    #  1. A named .zip release asset (browser_download_url — always direct)
+    #  2. codeload.github.com direct URL (no auth, no 300 redirect)
+    zip_url = _codeload_url(latest_tag)
     for asset in data.get("assets", []):
         if asset.get("name", "").endswith(".zip"):
             zip_url = asset["browser_download_url"]
