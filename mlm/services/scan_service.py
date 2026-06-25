@@ -27,20 +27,29 @@ class ScanService:
         files_added: int,
         files_updated: int = 0,
         files_removed: int = 0,
+        warnings_count: int = 0,
         status: str = "completed",
         error_message: str | None = None,
     ) -> None:
+        """Persist the final counters for a completed scan run.
+
+        ``warnings_count`` was previously missing from both the method
+        signature and the UPDATE statement, so the schema column was always
+        left at 0 regardless of how many warnings the scanner collected
+        (issue #11).
+        """
         with get_connection() as conn:
             conn.execute(
                 """
                 UPDATE scan_runs
-                SET finished_at   = ?,
-                    status        = ?,
-                    files_seen    = ?,
-                    files_added   = ?,
-                    files_updated = ?,
-                    files_removed = ?,
-                    error_message = ?
+                SET finished_at    = ?,
+                    status         = ?,
+                    files_seen     = ?,
+                    files_added    = ?,
+                    files_updated  = ?,
+                    files_removed  = ?,
+                    warnings_count = ?,
+                    error_message  = ?
                 WHERE id = ?
                 """,
                 (
@@ -50,6 +59,7 @@ class ScanService:
                     files_added,
                     files_updated,
                     files_removed,
+                    warnings_count,
                     error_message,
                     scan_run_id,
                 ),

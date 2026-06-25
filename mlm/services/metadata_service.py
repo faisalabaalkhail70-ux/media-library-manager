@@ -169,12 +169,12 @@ class MetadataService:
     def refresh_entity(self, entity_id: int) -> dict:
         """Re-fetch TMDB metadata for an existing entity and update the DB.
 
-        Used by the "Refresh Metadata" button in MoviesView.
+        Used by the 'Refresh Metadata' button in MoviesView.
         Returns a dict with 'status', 'title', and 'tmdb_id'.
         Raises ValueError if the entity is not found or has no tmdb_id.
         """
-        import json as _json
-
+        # Removed redundant `import json as _json` that was shadowing the
+        # module-level `import json` already present at the top (issue #8).
         with get_connection() as conn:
             row = conn.execute(
                 "SELECT tmdb_id, media_type, title FROM media_entities WHERE id = ?",
@@ -200,20 +200,20 @@ class MetadataService:
             release     = details.get("release_date") or ""
             year        = int(release[:4]) if len(release) >= 4 else None
             rating      = details.get("vote_average")
-            genres_json = _json.dumps(details.get("genres", []))
+            genres_json = json.dumps(details.get("genres", []))
             poster      = details.get("poster_path")
             plot        = details.get("overview")
-            meta_json   = _json.dumps(details)
+            meta_json   = json.dumps(details)
         else:
             details     = self.tmdb.tv_details(tmdb_id)
             new_title   = details.get("name") or title
             air_date    = details.get("first_air_date") or ""
             year        = int(air_date[:4]) if len(air_date) >= 4 else None
             rating      = details.get("vote_average")
-            genres_json = _json.dumps(details.get("genres", []))
+            genres_json = json.dumps(details.get("genres", []))
             poster      = details.get("poster_path")
             plot        = details.get("overview")
-            meta_json   = _json.dumps(details)
+            meta_json   = json.dumps(details)
 
         with get_connection() as conn:
             conn.execute(
@@ -229,4 +229,3 @@ class MetadataService:
 
         log.info("Refreshed metadata for entity_id=%d ('%s')", entity_id, new_title)
         return {"status": "refreshed", "title": new_title, "tmdb_id": tmdb_id}
-

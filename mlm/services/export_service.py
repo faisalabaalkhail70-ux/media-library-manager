@@ -92,29 +92,44 @@ class ExportService:
 
         c = canvas.Canvas(str(out), pagesize=A4)
         width, height = A4
-        y = height - 50
 
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(40, y, f"Media Library Manager \u2014 {report_name.replace('_', ' ').title()}")
-        y -= 10
-        c.setStrokeColorRGB(0.2, 0.2, 0.2)
-        c.line(40, y, width - 40, y)
-        y -= 20
+        # Column headers string — built once, reused on every page.
+        col_headers = " | ".join(str(h)[:18] for h in df.columns.tolist())
 
-        c.setFont("Helvetica-Bold", 8)
-        headers = " | ".join(str(h)[:18] for h in df.columns.tolist())
-        c.drawString(40, y, headers[:160])
-        y -= 14
+        def _draw_pdf_header(y: float) -> float:
+            """Draw the report title, divider, and column headers.
 
-        c.setFont("Helvetica", 8)
+            Called once for the first page and again after every showPage()
+            so that every page carries full context.  Returns the updated y
+            position after all header elements have been drawn.
+            """
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(
+                40, y,
+                f"Media Library Manager \u2014 "
+                f"{report_name.replace('_', ' ').title()}",
+            )
+            y -= 10
+            c.setStrokeColorRGB(0.2, 0.2, 0.2)
+            c.line(40, y, width - 40, y)
+            y -= 20
+            c.setFont("Helvetica-Bold", 8)
+            c.drawString(40, y, col_headers[:160])
+            y -= 14
+            c.setFont("Helvetica", 8)
+            return y
+
+        y = _draw_pdf_header(height - 50)
+
         for _, row in df.iterrows():
             line = " | ".join(str(v)[:18] for v in row.tolist())
             c.drawString(40, y, line[:160])
             y -= 12
             if y < 50:
                 c.showPage()
-                y = height - 40
-                c.setFont("Helvetica", 8)
+                # Re-draw the header on the new page so readers always have
+                # column context — previously this was missing (issue #6).
+                y = _draw_pdf_header(height - 50)
 
         c.save()
         return str(out)

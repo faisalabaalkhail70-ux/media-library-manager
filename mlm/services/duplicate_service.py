@@ -24,6 +24,8 @@ from mlm.db.repositories.duplicates_repo import DuplicatesRepository
 from mlm.db.repositories.files_repo import FilesRepository
 from mlm.utils.hashing import partial_md5, full_md5
 from mlm.utils.similarity import text_similarity
+# NOTE: `same_episode` removed from this import — it was unused (issue #7).
+# The module uses its own _EP_CODE_RE / ep_code_re inline regex instead.
 
 log = logging.getLogger(__name__)
 
@@ -52,25 +54,18 @@ _PUNC_RE = re.compile(r'[._\-\[\](){}]+')
 
 
 def _extract_show_title(filename: str) -> str:
-    """Return just the show/movie title portion of a filename.
-
-    'Dexter.S02E01.1080p.BluRay.x265-RARBG.mp4'  -> 'dexter'
-    'Die.Hart.S02E01.1080p.WEB.H264-GLHF.mkv'    -> 'die hart'
-    'Inception.2010.1080p.BluRay.x264.mp4'        -> 'inception'
-    """
-    name = re.sub(r'\.[a-zA-Z0-9]{2,5}$', '', filename)  # drop extension
-    name = _EP_CODE_RE.sub('', name)                      # drop SxxExx and everything after
+    name = re.sub(r'\.[a-zA-Z0-9]{2,5}$', '', filename)
+    name = _EP_CODE_RE.sub('', name)
     name = _PUNC_RE.sub(' ', name)
     name = _STRIP_RE.sub(' ', name)
     return re.sub(r'\s{2,}', ' ', name).strip().lower()
 
 
 def _title_similar(a: str, b: str) -> bool:
-    """True when the show/movie titles are close enough to be the same."""
     ta = _extract_show_title(a)
     tb = _extract_show_title(b)
     if not ta or not tb:
-        return True  # can't extract title — let other guards decide
+        return True
     return SequenceMatcher(None, ta, tb).ratio() >= _MIN_TITLE_SIMILARITY
 
 
@@ -110,22 +105,12 @@ class DuplicateService:
 
     def build_duplicate_groups(self) -> dict:
         files = self._list_candidate_files()
-
-        # Clear non-ignored groups, then immediately snapshot which file IDs
-        # are protected by 'ignored' groups.  We do this BEFORE writing any new
-        # groups so that the snapshot only reflects pre-existing ignored rows —
-        # not rows we are about to insert (which would incorrectly exclude valid
-        # candidates from the possible-duplicates pass).
         self.repo.clear_non_ignored_groups()
         ignored_ids: set[int] = self._ignored_file_ids()
 
         log.info("Building duplicate groups from %d candidate files", len(files))
 
-        # Track file IDs used by the exact/quality passes in-memory so that
-        # _build_possible_duplicates() does not need to re-query the DB and
-        # cannot accidentally pick up freshly inserted non-ignored rows.
         used_ids: set[int] = set()
-
         exact_groups   = self._build_exact_duplicates(files, used_ids)
         quality_groups = self._build_quality_variants(files, used_ids)
         remaining      = [f for f in files if f['id'] not in used_ids]
@@ -140,8 +125,6 @@ class DuplicateService:
             'quality_groups':  quality_groups,
             'possible_groups': possible_groups,
         }
-
-    # ── Exact duplicates ──────────────────────────────────────────────────
 
     def _build_exact_duplicates(self, files: list[dict], used_ids: set[int]) -> int:
         by_size: dict[int, list[dict]] = defaultdict(list)
@@ -179,8 +162,6 @@ class DuplicateService:
                     group_count += 1
 
         return group_count
-
-    # ── Quality variants ──────────────────────────────────────────────────
 
     def _build_quality_variants(self, files: list[dict], used_ids: set[int]) -> int:
         entity_buckets: dict[int, list[dict]] = defaultdict(list)
@@ -234,8 +215,6 @@ class DuplicateService:
 
         return group_count
 
-    # ── Possible duplicates ──────────────────────────────────────────────────
-
     def _build_possible_duplicates(
         self, files: list[dict], ignored_ids: set[int]
     ) -> int:
@@ -253,7 +232,7 @@ class DuplicateService:
             m = ep_code_re.search(f['file_name'])
             if m:
                 show_title = _extract_show_title(f['file_name'])
-                ep_key     = m.group(0).upper()   # e.g. 'S01E08'
+                ep_key     = m.group(0).upper()
                 ep_title_buckets[(show_title, ep_key)].append(f)
             else:
                 no_code.append(f)
