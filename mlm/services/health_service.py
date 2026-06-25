@@ -2,15 +2,15 @@
 import logging
 from pathlib import Path
 
+from mlm.app.config import AppConfig
 from mlm.db.connection import get_connection
 
 log = logging.getLogger(__name__)
 
-# Extensions that HealthService and AppConfig share; keep in sync with config.
-VALID_EXTS: frozenset[str] = frozenset({
-    ".mkv", ".mp4", ".avi", ".m4v", ".mov",
-    ".wmv", ".ts", ".webm", ".flv", ".vob",
-})
+# Derive the valid extension set from AppConfig so this file can never drift
+# out of sync with the supported extensions declared in config.py.
+# (Previously this was a separate hard-coded frozenset — see issue #3.)
+VALID_EXTS: frozenset[str] = frozenset(AppConfig().supported_video_exts)
 
 
 class HealthService:

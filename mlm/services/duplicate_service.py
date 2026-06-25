@@ -23,7 +23,7 @@ from mlm.db.connection import get_connection
 from mlm.db.repositories.duplicates_repo import DuplicatesRepository
 from mlm.db.repositories.files_repo import FilesRepository
 from mlm.utils.hashing import partial_md5, full_md5
-from mlm.utils.similarity import text_similarity, same_episode
+from mlm.utils.similarity import text_similarity
 
 log = logging.getLogger(__name__)
 
@@ -110,14 +110,26 @@ class DuplicateService:
 
     def build_duplicate_groups(self) -> dict:
         files = self._list_candidate_files()
+
+        # Clear non-ignored groups, then immediately snapshot which file IDs
+        # are protected by 'ignored' groups.  We do this BEFORE writing any new
+        # groups so that the snapshot only reflects pre-existing ignored rows —
+        # not rows we are about to insert (which would incorrectly exclude valid
+        # candidates from the possible-duplicates pass).
         self.repo.clear_non_ignored_groups()
+        ignored_ids: set[int] = self._ignored_file_ids()
+
         log.info("Building duplicate groups from %d candidate files", len(files))
 
-        exact_groups    = self._build_exact_duplicates(files)
-        quality_groups  = self._build_quality_variants(files)
-        used_ids        = self._ids_in_groups()
-        remaining       = [f for f in files if f['id'] not in used_ids]
-        possible_groups = self._build_possible_duplicates(remaining)
+        # Track file IDs used by the exact/quality passes in-memory so that
+        # _build_possible_duplicates() does not need to re-query the DB and
+        # cannot accidentally pick up freshly inserted non-ignored rows.
+        used_ids: set[int] = set()
+
+        exact_groups   = self._build_exact_duplicates(files, used_ids)
+        quality_groups = self._build_quality_variants(files, used_ids)
+        remaining      = [f for f in files if f['id'] not in used_ids]
+        possible_groups = self._build_possible_duplicates(remaining, ignored_ids)
 
         log.info(
             "Scan complete: %d exact, %d quality-variant, %d possible",
@@ -129,16 +141,9 @@ class DuplicateService:
             'possible_groups': possible_groups,
         }
 
-    def _ids_in_groups(self) -> set[int]:
-        with get_connection() as conn:
-            rows = conn.execute(
-                "SELECT media_file_id FROM duplicate_items"
-            ).fetchall()
-        return {r[0] for r in rows}
-
     # ── Exact duplicates ──────────────────────────────────────────────────
 
-    def _build_exact_duplicates(self, files: list[dict]) -> int:
+    def _build_exact_duplicates(self, files: list[dict], used_ids: set[int]) -> int:
         by_size: dict[int, list[dict]] = defaultdict(list)
         for row in files:
             by_size[row['file_size_bytes']].append(row)
@@ -170,13 +175,14 @@ class DuplicateService:
                     gid = self.repo.create_group('exact', 1.0)
                     for item in full_items:
                         self.repo.add_item(gid, item['id'], 1.0, {'reason': 'identical'})
+                        used_ids.add(item['id'])
                     group_count += 1
 
         return group_count
 
     # ── Quality variants ──────────────────────────────────────────────────
 
-    def _build_quality_variants(self, files: list[dict]) -> int:
+    def _build_quality_variants(self, files: list[dict], used_ids: set[int]) -> int:
         entity_buckets: dict[int, list[dict]] = defaultdict(list)
         for f in files:
             if f['entity_id'] is not None:
@@ -223,24 +229,21 @@ class DuplicateService:
                         'resolution': item.get('resolution'),
                         'codec':      item.get('video_codec'),
                     })
+                    used_ids.add(item['id'])
                 group_count += 1
 
         return group_count
 
     # ── Possible duplicates ──────────────────────────────────────────────────
-    # Same show title + same episode code + different quality / folder.
 
-    def _build_possible_duplicates(self, files: list[dict]) -> int:
+    def _build_possible_duplicates(
+        self, files: list[dict], ignored_ids: set[int]
+    ) -> int:
         group_count = 0
         used_pairs: set[tuple[int, int]] = set()
-        ignored_ids = self._ignored_file_ids()
 
         ep_code_re = re.compile(r'[Ss](\d{1,2})[Ee](\d{1,2})')
 
-        # Key insight: bucket by (normalised_show_title, SxxExx).
-        # Two files only enter the same bucket when they share BOTH the show name
-        # AND the episode code — Dexter S01E01 and Die.Hart S01E01 are in
-        # different buckets because 'dexter' != 'die hart'.
         ep_title_buckets: dict[tuple[str, str], list[dict]] = defaultdict(list)
         no_code: list[dict] = []
 
@@ -258,7 +261,6 @@ class DuplicateService:
         def _check_pair(a: dict, b: dict) -> None:
             nonlocal group_count
 
-            # Guard 0: identical path → same physical file
             if a['file_path'] and b['file_path'] and a['file_path'] == b['file_path']:
                 return
 
@@ -266,16 +268,13 @@ class DuplicateService:
             if pair_key in used_pairs:
                 return
 
-            # Guard 1: same parent folder → different episodes of same show
             if (a.get('parent_folder') and b.get('parent_folder') and
                     a['parent_folder'] == b['parent_folder']):
                 return
 
-            # Guard 2: size too different
             if abs(a['file_size_bytes'] - b['file_size_bytes']) > _MAX_SIZE_DIFF_BYTES:
                 return
 
-            # Score on normalised name + quality-tag difference
             name_score   = text_similarity(_normalise(a['file_name']), _normalise(b['file_name']))
             if name_score < _MIN_NAME_SCORE:
                 return
@@ -299,13 +298,11 @@ class DuplicateService:
                 })
             group_count += 1
 
-        # Compare within (same show title, same episode code) buckets only
         for bucket_files in ep_title_buckets.values():
             for i, a in enumerate(bucket_files):
                 for b in bucket_files[i + 1:]:
                     _check_pair(a, b)
 
-        # Files with no episode code (movies): still require title similarity
         for i, a in enumerate(no_code):
             for b in no_code[i + 1:]:
                 if not _title_similar(a['file_name'], b['file_name']):

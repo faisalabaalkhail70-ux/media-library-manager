@@ -1,6 +1,6 @@
 """Database schema definition and initialisation."""
 import logging
-from mlm.db.connection import get_connection
+from mlm.db.connection import create_connection, get_connection
 
 log = logging.getLogger(__name__)
 
@@ -190,17 +190,24 @@ CURRENT_VERSION = 4
 def init_database() -> None:
     """Initialise schema and apply any outstanding migrations.
 
-    NOTE: executescript() issues an implicit COMMIT before it runs, which means
-    any subsequent writes inside the same get_connection() block are in a fresh
-    implicit transaction that is NOT rolled back on failure by the context manager.
-    To keep the schema_version write inside the managed transaction we:
-      1. Call executescript() for DDL only (safe — DDL is always auto-committed in SQLite).
-      2. Read the current version.
-      3. Write the new version with an explicit DELETE + INSERT so there is always
-         exactly one row and the write participates in the get_connection() commit.
+    executescript() issues an implicit COMMIT before it runs, so DDL must be
+    applied on a *bare* connection that is NOT managed by get_connection().
+    This keeps the schema_version write inside its own clean, rolled-back-on-
+    error transaction that is completely separate from the DDL execution.
+
+    Step 1  – Run DDL on a bare connection (executescript auto-commits).
+    Step 2  – Read + write schema_version inside a proper get_connection()
+              block so it participates in the commit/rollback cycle.
     """
+    # --- Step 1: DDL on a bare connection (safe — DDL always auto-commits) ---
+    ddl_conn = create_connection()
+    try:
+        ddl_conn.executescript(SCHEMA_SQL)
+    finally:
+        ddl_conn.close()
+
+    # --- Step 2: version bookkeeping inside a managed transaction -----------
     with get_connection() as conn:
-        conn.executescript(SCHEMA_SQL)
         row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
         existing = row["version"] if row else 0
         if existing < CURRENT_VERSION:

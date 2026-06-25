@@ -91,22 +91,47 @@ class RenameService:
         return previews
 
     def apply_preview(self, preview_rows: list[dict]) -> dict:
+        """Apply all 'valid' rename rows.
+
+        Each rename is a two-phase operation with its own isolated transaction:
+          1. Ledger write  – ActionsRepository.create_action() opens its own
+             get_connection() block internally, which is fine.
+          2. File move on disk.
+          3. DB path update + ledger status update — both happen inside a single
+             get_connection() block so they commit or roll back together.
+
+        Keeping the ledger writes in their own connections (rather than mixing
+        them into the same connection object as the media_files UPDATE) prevents
+        the cross-connection transaction corruption described in issue #2.
+        """
         success = failed = 0
-        with get_connection() as conn:
-            for row in preview_rows:
-                if row["status"] != "valid":
-                    continue
 
-                action_id = self.actions_repo.create_action(
-                    action_type="rename",
-                    media_file_id=row["media_file_id"],
-                    old_path=row["old_path"],
-                    new_path=row["new_path"],
-                    status="pending",
-                )
+        for row in preview_rows:
+            if row["status"] != "valid":
+                continue
 
-                try:
-                    move_file(row["old_path"], row["new_path"])
+            # Phase 1: record intent in the action ledger (its own transaction)
+            action_id = self.actions_repo.create_action(
+                action_type="rename",
+                media_file_id=row["media_file_id"],
+                old_path=row["old_path"],
+                new_path=row["new_path"],
+                status="pending",
+            )
+
+            # Phase 2: physical move
+            try:
+                move_file(row["old_path"], row["new_path"])
+            except Exception as exc:
+                # Move failed — mark the ledger entry and move on
+                self.actions_repo.mark_failed(action_id, str(exc))
+                failed += 1
+                log.error("Rename failed for %s: %s", row["old_path"], exc, exc_info=True)
+                continue
+
+            # Phase 3: update DB path + mark ledger done — one atomic transaction
+            try:
+                with get_connection() as conn:
                     conn.execute(
                         """
                         UPDATE media_files
@@ -120,12 +145,12 @@ class RenameService:
                             row["media_file_id"],
                         ),
                     )
-                    self.actions_repo.mark_done(action_id)
-                    success += 1
-                    log.info("Renamed: %s \u2192 %s", row["old_path"], row["new_path"])
-                except Exception as exc:
-                    self.actions_repo.mark_failed(action_id, str(exc))
-                    failed += 1
-                    log.error("Rename failed for %s: %s", row["old_path"], exc, exc_info=True)
+                self.actions_repo.mark_done(action_id)
+                success += 1
+                log.info("Renamed: %s \u2192 %s", row["old_path"], row["new_path"])
+            except Exception as exc:
+                self.actions_repo.mark_failed(action_id, str(exc))
+                failed += 1
+                log.error("DB update failed after rename %s: %s", row["new_path"], exc, exc_info=True)
 
         return {"success": success, "failed": failed}
