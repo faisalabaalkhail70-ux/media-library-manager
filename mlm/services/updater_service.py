@@ -22,6 +22,7 @@ import os
 import shutil
 import tempfile
 import threading
+import urllib.parse
 import urllib.request
 import urllib.error
 import zipfile
@@ -34,7 +35,10 @@ REPO  = "media-library-manager"
 _API  = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
 _UA   = "MediaLibraryManager-Updater/1.0"
 
-# Timeout (seconds) for the initial API/header request
+# GitHub API hostname — only requests to this host get the auth token.
+_GITHUB_API_HOST = "api.github.com"
+
+# Timeout (seconds) for the initial API / redirect-resolution request
 CONNECT_TIMEOUT = 10
 # Timeout (seconds) for the streaming zip download
 READ_TIMEOUT = 300
@@ -44,41 +48,73 @@ class DownloadCancelled(Exception):
     """Raised when the download is cancelled via the cancel flag."""
 
 
-def _make_headers() -> dict[str, str]:
-    """Build request headers, attaching a GitHub token when one is saved.
+def _is_api_url(url: str) -> bool:
+    """Return True only when *url* targets api.github.com.
 
-    The token is read from the DB settings table under the key
-    'github_token'.  If no token is stored the headers fall back to
-    unauthenticated (60 req/hr API limit — sufficient for update checks,
-    but a token is recommended for reliable asset downloads).
+    CDN hosts (codeload.github.com, objects.githubusercontent.com, etc.)
+    must NOT receive the Authorization header — they return HTTP 415.
+    """
+    return urllib.parse.urlparse(url).hostname == _GITHUB_API_HOST
+
+
+def _make_headers(url: str = "") -> dict[str, str]:
+    """Build request headers for *url*.
+
+    Authorization is attached only when:
+      - a non-empty 'github_token' is stored in DB settings, AND
+      - the target host is api.github.com
+
+    CDN URLs (codeload.github.com etc.) receive only the User-Agent header
+    because they reject an Authorization header with HTTP 415.
     """
     headers: dict[str, str] = {"User-Agent": _UA}
-    try:
-        from mlm.db.repositories.settings_repo import SettingsRepository
-        token = SettingsRepository().get("github_token", "").strip()
-        if token:
-            headers["Authorization"] = f"token {token}"
-    except Exception:  # noqa: BLE001
-        pass  # DB not ready yet — skip auth silently
+    if _is_api_url(url):
+        try:
+            from mlm.db.repositories.settings_repo import SettingsRepository
+            token = SettingsRepository().get("github_token", "").strip()
+            if token:
+                headers["Authorization"] = f"token {token}"
+        except Exception:  # noqa: BLE001
+            pass  # DB not ready — skip auth silently
     return headers
 
 
 def _resolve_download_url(url: str) -> str:
-    """Follow redirects and return the final direct download URL.
+    """Follow redirects and return the final direct CDN download URL.
 
-    GitHub's zipball_url and browser_download_url both go through the
-    API or CDN redirect layer.  urllib follows HTTP 301/302 automatically,
-    but HTTP 300 (Multiple Choices) is not auto-followed.  By opening the
-    URL and reading resp.url we always get the final resolved location
-    regardless of how many hops it takes.
+    GitHub's zipball_url goes through api.github.com which redirects to
+    codeload.github.com.  We open the API URL with auth headers, follow
+    all redirects, then return resp.url (the final CDN location).
 
-    The response body is NOT read here — we just resolve the URL and close
-    the connection immediately so the actual streaming happens in one clean
-    request to the CDN.
+    The response body is NOT read here — we just capture the resolved URL
+    and close immediately so streaming happens in one clean CDN request.
     """
-    req = urllib.request.Request(url, headers=_make_headers())
+    req = urllib.request.Request(url, headers=_make_headers(url))
     with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT) as resp:
         return resp.url  # final URL after all redirects
+
+
+def _app_root() -> str:
+    """Return the absolute path to the application root directory.
+
+    Derived from the location of the *mlm* package itself — specifically
+    from mlm/__version__.py — so it matches exactly what Python is
+    importing from, regardless of the working directory or launch method
+    (python -m mlm, IDE runner, frozen exe, etc.).
+
+    Layout assumed::
+
+        <app_root>/
+            mlm/
+                __version__.py
+                services/
+                    updater_service.py   ← this file
+    """
+    import mlm
+    # mlm.__file__ is <app_root>/mlm/__init__.py
+    return os.path.dirname(os.path.abspath(mlm.__file__ or ""))
+    # That gives us <app_root>/mlm/ — we want <app_root>/
+    # so take one more dirname.
 
 
 def _parse_version(tag: str) -> tuple[int, ...]:
@@ -97,11 +133,11 @@ def check_for_update() -> dict | None:
     should catch and surface as a user-friendly message.
 
     The returned 'zip_url' is always a fully-resolved direct CDN URL so
-    the downloader never has to deal with API redirects.
+    the downloader never has to deal with API redirects or auth issues.
     """
     from mlm.__version__ import VERSION
 
-    req = urllib.request.Request(_API, headers=_make_headers())
+    req = urllib.request.Request(_API, headers=_make_headers(_API))
     with urllib.request.urlopen(req, timeout=CONNECT_TIMEOUT) as resp:
         data = json.loads(resp.read().decode())
 
@@ -113,7 +149,7 @@ def check_for_update() -> dict | None:
         return None
 
     # Prefer a manually uploaded .zip asset; fall back to GitHub's auto-
-    # generated zipball.  Either way, resolve redirects NOW so the worker
+    # generated zipball. Either way resolve redirects NOW so the worker
     # always receives a plain CDN URL with no further redirect surprises.
     raw_zip_url = data.get("zipball_url", "")
     for asset in data.get("assets", []):
@@ -121,8 +157,7 @@ def check_for_update() -> dict | None:
             raw_zip_url = asset["browser_download_url"]
             break
 
-    # Resolve the final direct URL at check time (fails fast here rather
-    # than surprising the user mid-download).
+    # Resolve at check time — fails fast here rather than mid-download.
     zip_url = _resolve_download_url(raw_zip_url)
 
     return {
@@ -143,29 +178,31 @@ def download_and_install(
     """Download *zip_url* and safely extract it over *dest_dir*.
 
     Uses a staging directory so the live app is only touched after a full,
-    successful extraction.  If extraction fails at any point the staging
+    successful extraction. If extraction fails at any point the staging
     directory is cleaned up and the live app remains untouched.
 
     Parameters
     ----------
     zip_url:      Direct CDN URL to the zip archive (pre-resolved, no redirects).
-    dest_dir:     Root folder of the running application.  Defaults to the
-                  directory that contains this file's package (two levels up).
+    dest_dir:     Root folder of the running application. Defaults to the
+                  parent of the mlm package directory (i.e. the folder that
+                  *contains* the mlm/ package). This is always the directory
+                  Python is importing from, regardless of launch method.
     progress_cb:  Optional callable(bytes_done, total_bytes) for progress UI.
     cancel_flag:  Optional threading.Event; when set the download loop raises
                   DownloadCancelled so the worker can exit cleanly.
     """
     if dest_dir is None:
-        # mlm/services/ -> mlm/ -> app_root/
-        dest_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        dest_dir = os.path.dirname(dest_dir)
+        # _app_root() returns <app_root>/mlm/ — we want the parent.
+        dest_dir = os.path.dirname(_app_root())
 
-    req = urllib.request.Request(zip_url, headers=_make_headers())
+    # The zip is a CDN URL — do NOT send Authorization to it.
+    req = urllib.request.Request(zip_url, headers=_make_headers(zip_url))
 
     with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
         tmp_path = tmp.name
 
-    # Staging directory lives next to the app root; cleaned up on any failure.
+    # Staging directory lives next to dest_dir; cleaned up on any failure.
     staging_dir = os.path.join(os.path.dirname(dest_dir), "_mlm_update_staging")
 
     try:
@@ -221,7 +258,7 @@ def download_and_install(
                 "update aborted to protect the running application."
             )
 
-        # ── Step 4: copy staging -> live app ─────────────────────────────────
+        # ── Step 4: copy staging → live app ─────────────────────────────────
         for root, dirs, files in os.walk(staging_dir):
             rel_root = os.path.relpath(root, staging_dir)
             for fname in files:
