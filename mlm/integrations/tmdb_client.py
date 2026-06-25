@@ -1,4 +1,24 @@
-"""TMDB API client with caching and secure key handling."""
+"""TMDB API client with caching and secure key handling.
+
+.. note:: Threading contract
+   Every method on this class that makes an HTTP request (``_get``, and all
+   public helpers that call it) MUST be invoked from a ``QThread`` worker
+   thread, never from the Qt main / GUI thread.
+
+   ``_throttle()`` calls ``time.sleep()`` which **blocks the calling thread**.
+   Calling it on the main thread freezes the entire GUI for up to
+   ``_RATE_LIMIT_DELAY`` seconds per request (issue #14).
+
+   The correct pattern is::
+
+       class MetadataWorker(QThread):
+           def run(self):
+               client = TMDBClient()
+               result = client.search_movie("Inception", 2010)  # safe here
+
+   Never call ``TMDBClient`` methods directly in a slot or event handler on
+   the main thread.
+"""
 import logging
 import time
 from urllib.parse import urlencode
@@ -33,6 +53,10 @@ class TMDBClient:
     The API key is read from the DB settings table and sent as a Bearer
     token header — never as a URL query parameter — to prevent it from
     appearing in logs or proxy traces.
+
+    .. warning::
+        All public methods block on ``time.sleep()`` inside ``_throttle()``.
+        See the module-level note for the mandatory threading contract.
     """
 
     BASE_URL = "https://api.themoviedb.org/3"
@@ -58,7 +82,13 @@ class TMDBClient:
         return key
 
     def _throttle(self) -> None:
-        """Ensure we respect TMDB rate limits."""
+        """Ensure we respect TMDB rate limits.
+
+        .. warning::
+            This method calls ``time.sleep()`` and **blocks the calling
+            thread**.  It MUST only be called from a ``QThread`` worker.
+            Calling it from the Qt main thread will freeze the GUI (issue #14).
+        """
         elapsed = time.monotonic() - self._last_request_at
         if elapsed < self._RATE_LIMIT_DELAY:
             time.sleep(self._RATE_LIMIT_DELAY - elapsed)

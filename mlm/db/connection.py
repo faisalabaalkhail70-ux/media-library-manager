@@ -2,6 +2,8 @@
 import sqlite3
 import logging
 from contextlib import contextmanager
+from collections.abc import Generator
+
 from mlm.app.paths import DB_PATH
 
 log = logging.getLogger(__name__)
@@ -25,8 +27,17 @@ def create_connection() -> sqlite3.Connection:
 
 
 @contextmanager
-def get_connection():
-    """Context manager that yields a connection, commits on success, rolls back on error."""
+def get_connection() -> Generator[sqlite3.Connection, None, None]:
+    """Context manager that yields a connection, commits on success, rolls back on error.
+
+    Return type annotated as ``Generator[sqlite3.Connection, None, None]`` so
+    that mypy / Pyright can fully type-check callers (issue #12).
+
+    Usage::
+
+        with get_connection() as conn:
+            conn.execute("SELECT 1")
+    """
     conn = create_connection()
     try:
         yield conn

@@ -82,27 +82,42 @@ class FilesRepository:
             ).fetchall()
         return {row["file_path"] for row in rows}
 
-    def fetch_library_rows(self, limit: int = 5000) -> list[dict]:
+    def fetch_library_rows(self, limit: int = 0) -> list[dict]:
+        """Return library rows, optionally capped to *limit*.
+
+        The previous default of ``limit=5000`` silently truncated libraries
+        larger than 5 000 files with no indication to callers (issue #13).
+
+        New behaviour
+        -------------
+        ``limit <= 0`` (the new default)  →  fetch ALL rows, no LIMIT clause.
+        ``limit > 0``                     →  cap results to that many rows.
+
+        Callers that still want a cap should pass an explicit value, e.g.::
+
+            repo.fetch_library_rows(limit=500)   # first 500 for a preview
+            repo.fetch_library_rows()            # all rows (new default)
+        """
+        base_query = """
+            SELECT
+                mf.id,
+                mf.file_name,
+                mf.file_path,
+                mf.extension,
+                mf.file_size_bytes,
+                mf.modified_at,
+                mf.resolution,
+                mf.video_codec,
+                me.title AS matched_title,
+                me.release_year
+            FROM media_files mf
+            LEFT JOIN media_entities me ON me.id = mf.entity_id
+            WHERE mf.removed_at IS NULL
+            ORDER BY mf.id DESC
+        """
         with get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT
-                    mf.id,
-                    mf.file_name,
-                    mf.file_path,
-                    mf.extension,
-                    mf.file_size_bytes,
-                    mf.modified_at,
-                    mf.resolution,
-                    mf.video_codec,
-                    me.title AS matched_title,
-                    me.release_year
-                FROM media_files mf
-                LEFT JOIN media_entities me ON me.id = mf.entity_id
-                WHERE mf.removed_at IS NULL
-                ORDER BY mf.id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            if limit > 0:
+                rows = conn.execute(base_query + "LIMIT ?", (limit,)).fetchall()
+            else:
+                rows = conn.execute(base_query).fetchall()
         return [dict(row) for row in rows]
