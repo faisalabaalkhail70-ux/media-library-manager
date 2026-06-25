@@ -2,6 +2,15 @@ import pandas as pd
 from mlm.db.connection import get_connection
 
 
+def _fmt_storage(bytes_total: float) -> str:
+    """Return a human-readable storage string: TB if >= 1 TB, else GB."""
+    gb = bytes_total / (1024 ** 3)
+    tb = bytes_total / (1024 ** 4)
+    if tb >= 1.0:
+        return f"{tb:.2f} TB"
+    return f"{gb:.1f} GB"
+
+
 class DashboardService:
 
     def library_overview(self) -> dict:
@@ -26,14 +35,15 @@ class DashboardService:
             return {
                 "total_files": 0, "total_movies": 0, "total_shows": 0,
                 "total_episodes": 0, "unmatched": 0,
-                "storage_gb": 0.0, "watch_hours": 0.0,
+                "storage_gb": 0.0, "storage_display": "0 GB", "watch_hours": 0.0,
             }
 
         total_files    = int(len(df))
         total_movies   = int((df["media_type"] == "movie").sum())
         total_episodes = int((df["media_type"] == "show").sum())
         unmatched      = int(df["media_type"].isna().sum())
-        storage_gb     = float(df["file_size_bytes"].fillna(0).sum() / (1024 ** 3))
+        total_bytes    = float(df["file_size_bytes"].fillna(0).sum())
+        storage_gb     = total_bytes / (1024 ** 3)
         watch_hours    = float(df["duration_seconds"].fillna(0).sum() / 3600)
 
         with get_connection() as conn:
@@ -44,11 +54,14 @@ class DashboardService:
         total_shows = int(shows_df["c"].iloc[0])
 
         return {
-            "total_files": total_files, "total_movies": total_movies,
-            "total_shows": total_shows, "total_episodes": total_episodes,
-            "unmatched": unmatched,
-            "storage_gb": round(storage_gb, 2),
-            "watch_hours": round(watch_hours, 2),
+            "total_files":      total_files,
+            "total_movies":     total_movies,
+            "total_shows":      total_shows,
+            "total_episodes":   total_episodes,
+            "unmatched":        unmatched,
+            "storage_gb":       round(storage_gb, 2),
+            "storage_display":  _fmt_storage(total_bytes),
+            "watch_hours":      round(watch_hours, 2),
         }
 
     def shows_completion(self) -> dict:

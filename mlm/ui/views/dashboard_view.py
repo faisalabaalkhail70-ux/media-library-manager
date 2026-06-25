@@ -148,7 +148,7 @@ class DashboardView(QWidget):
             ("Episodes",         "0", _ACCENTS[2]),
             ("Unmatched Files",  "0", _ACCENTS[3]),
             ("Missing Episodes", "0", _ACCENTS[4]),
-            ("Storage (GB)",     "0", _ACCENTS[5]),
+            ("Storage",          "0", _ACCENTS[5]),
             ("Watch Hours",      "0", _ACCENTS[6]),
             ("Total Files",      "0", _ACCENTS[7]),
         ]
@@ -238,7 +238,7 @@ class DashboardView(QWidget):
             str(overview["total_episodes"]),
             str(overview["unmatched"]),
             str(missing_ep),
-            str(overview["storage_gb"]),
+            overview["storage_display"],   # smart units: "2.14 TB" or "892.3 GB"
             str(overview["watch_hours"]),
             str(overview["total_files"]),
         ]

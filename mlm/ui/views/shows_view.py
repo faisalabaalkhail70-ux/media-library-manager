@@ -1,9 +1,11 @@
 import json
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QPushButton, QHBoxLayout,
-    QTableView, QLineEdit, QAbstractItemView, QStackedWidget
+    QTableView, QLineEdit, QAbstractItemView, QStackedWidget,
+    QStyledItemDelegate, QStyleOptionViewItem, QApplication,
 )
 from PySide6.QtCore import Qt, QSortFilterProxyModel
+from PySide6.QtGui import QColor
 from mlm.db.connection import get_connection
 from mlm.ui.models.shows_model import ShowsTableModel
 from mlm.ui.column_visibility import (
@@ -14,6 +16,26 @@ from mlm.ui.filter_panel import FilterPanel
 from mlm.ui.grid_view import PosterGridWidget
 from mlm.ui.views.entity_detail_panel import EntityDetailPanel
 from mlm.workers.episode_worker import EpisodeWorker
+
+
+class _ColorDelegate(QStyledItemDelegate):
+    """Delegate that forces the model's ForegroundRole colour to be painted
+    regardless of any QSS colour rules on the view.
+
+    Qt stylesheets set a palette colour that wins over model ForegroundRole
+    in the default delegate.  By overriding initStyleOption we inject the
+    model colour directly into the option's palette so it is guaranteed to
+    be used when the style draws the text.
+    """
+
+    def initStyleOption(self, option: QStyleOptionViewItem, index) -> None:
+        super().initStyleOption(option, index)
+        color = index.data(Qt.ForegroundRole)
+        if isinstance(color, QColor) and color.isValid():
+            palette = option.palette
+            palette.setColor(palette.Text, color)
+            palette.setColor(palette.HighlightedText, color)
+            option.palette = palette
 
 
 class ShowsView(QWidget):
@@ -84,13 +106,16 @@ class ShowsView(QWidget):
         self.table = QTableView()
         self.table.setModel(self._proxy)
         self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.setAlternatingRowColors(False)   # off — our model owns all colors
+        self.table.setAlternatingRowColors(False)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setSortingEnabled(True)
         self.table.horizontalHeader().setSortIndicatorShown(True)
         self.table.doubleClicked.connect(self._open_episode_detail)
+        # Install the colour delegate so stylesheet rules cannot override
+        # the semantic green/red/amber colours from ShowsTableModel.
+        self.table.setItemDelegate(_ColorDelegate(self.table))
         self._stack.addWidget(self.table)
 
         self._grid = PosterGridWidget()
@@ -113,7 +138,6 @@ class ShowsView(QWidget):
             rows = conn.execute(
                 """
                 WITH season_summary AS (
-                    -- Aggregate per (entity, season) first to avoid correlated subqueries
                     SELECT
                         entity_id,
                         season_number,
@@ -125,10 +149,8 @@ class ShowsView(QWidget):
                 SELECT
                     me.id AS entity_id,
                     me.title, me.release_year, me.rating, me.genres_json, me.poster_path,
-                    -- seasons_have: seasons with at least one episode present
                     COUNT(DISTINCT CASE WHEN ss.present_count > 0
                           THEN ss.season_number END)                           AS seasons_have,
-                    -- seasons_missing: seasons with NO episodes at all present
                     COUNT(DISTINCT CASE WHEN ss.present_count = 0
                           THEN ss.season_number END)                           AS seasons_missing,
                     SUM(COALESCE(ss.present_count, 0))                         AS episodes_have,
