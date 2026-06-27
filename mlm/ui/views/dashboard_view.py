@@ -143,14 +143,14 @@ class DashboardView(QWidget):
         self._root.addWidget(self._grid_widget)
 
         stats_meta = [
-            ("Movies",           "0", _ACCENTS[0]),
-            ("TV Shows",         "0", _ACCENTS[1]),
-            ("Episodes",         "0", _ACCENTS[2]),
-            ("Unmatched Files",  "0", _ACCENTS[3]),
-            ("Missing Episodes", "0", _ACCENTS[4]),
-            ("Storage",          "0", _ACCENTS[5]),
-            ("Watch Hours",      "0", _ACCENTS[6]),
-            ("Total Files",      "0", _ACCENTS[7]),
+            ("Movies",           "0",     _ACCENTS[0]),
+            ("TV Shows",         "0",     _ACCENTS[1]),
+            ("Episodes",         "0",     _ACCENTS[2]),
+            ("Unmatched Files",  "0",     _ACCENTS[3]),
+            ("Missing Episodes", "0",     _ACCENTS[4]),
+            ("Storage",          "0 GB",  _ACCENTS[5]),
+            ("Watch Hours",      "0 min", _ACCENTS[6]),
+            ("Total Files",      "0",     _ACCENTS[7]),
         ]
         for i, (label, val, accent) in enumerate(stats_meta):
             card = NeonStatCard(val, label, accent)
@@ -238,8 +238,8 @@ class DashboardView(QWidget):
             str(overview["total_episodes"]),
             str(overview["unmatched"]),
             str(missing_ep),
-            overview["storage_display"],   # smart units: "2.14 TB" or "892.3 GB"
-            str(overview["watch_hours"]),
+            overview["storage_display"],    # e.g. "1.99 TB"
+            overview["watch_display"],       # e.g. "1,596 h"  ← fixed
             str(overview["total_files"]),
         ]
         for card, val in zip(self._stat_cards, values):

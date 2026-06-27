@@ -1,3 +1,4 @@
+import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QHBoxLayout, QPushButton,
     QFileDialog, QLineEdit, QMessageBox, QComboBox, QProgressBar,
@@ -8,6 +9,34 @@ from mlm.app.config import AppConfig
 from mlm.db.repositories.directories_repo import DirectoriesRepository
 from mlm.workers.scan_worker import ScanWorker, DEFAULT_EXCLUDED_FOLDERS
 from mlm.db.connection import get_connection
+
+
+def _pick_multiple_directories(parent: QWidget, title: str = "Select media folders") -> list[str]:
+    """Show a folder picker that lets the user select multiple directories.
+
+    Qt's native folder dialog only returns one path.  We work around this by
+    re-opening the dialog in a loop: each accepted path is collected and the
+    dialog reopens pre-set to the last chosen location so the user can quickly
+    navigate to the next folder.  The loop ends when the user cancels.
+
+    Returns a (possibly empty) list of unique, non-empty directory paths.
+    """
+    selected: list[str] = []
+    start_dir = ""
+    while True:
+        path = QFileDialog.getExistingDirectory(
+            parent,
+            f"{title} ({len(selected)} selected — Cancel to finish)",
+            start_dir or os.path.expanduser("~"),
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if not path:
+            # User cancelled → done collecting
+            break
+        if path not in selected:
+            selected.append(path)
+        start_dir = os.path.dirname(path)  # re-open near last selection
+    return selected
 
 
 class ScannerView(QWidget):
@@ -32,8 +61,13 @@ class ScannerView(QWidget):
 
         row = QHBoxLayout()
         self.path_input = QLineEdit()
-        self.path_input.setPlaceholderText("Select a media root directory...")
+        self.path_input.setPlaceholderText("Select one or more media root directories...")
         browse_btn = QPushButton("Browse")
+        browse_btn.setToolTip(
+            "Click Browse to pick a folder.\n"
+            "Pick as many folders as you like — a new dialog opens after each one.\n"
+            "Cancel the dialog when you are done."
+        )
         browse_btn.clicked.connect(self.browse_directory)
         row.addWidget(self.path_input)
         row.addWidget(browse_btn)
@@ -159,9 +193,14 @@ class ScannerView(QWidget):
     # ── Actions ───────────────────────────────────────────────
 
     def browse_directory(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Select media root")
-        if path:
-            self.path_input.setText(path)
+        """Open a loop-based multi-folder picker and populate path_input.
+
+        All selected paths are joined with os.pathsep so toggle_scan()
+        can split and register them individually.
+        """
+        paths = _pick_multiple_directories(self, "Select media root folders")
+        if paths:
+            self.path_input.setText(os.pathsep.join(paths))
 
     def remove_selected_directory(self) -> None:
         item = self.dirs_list.currentItem()
@@ -181,7 +220,6 @@ class ScannerView(QWidget):
             return
 
         with get_connection() as conn:
-            # Step 1 — collect IDs of ALL files (active + soft-deleted) for this dir
             file_ids = [
                 r["id"] for r in conn.execute(
                     "SELECT id FROM media_files WHERE directory_id = ?", (dir_id,)
@@ -190,33 +228,24 @@ class ScannerView(QWidget):
 
             if file_ids:
                 ph = ",".join("?" * len(file_ids))
-
-                # Step 2 — null episode FK (keep episode rows, mark missing)
                 conn.execute(
                     f"UPDATE episodes SET media_file_id = NULL, is_missing = 1 "
                     f"WHERE media_file_id IN ({ph})",
                     file_ids,
                 )
-
-                # Step 3 — remove duplicate_items referencing these files
                 conn.execute(
                     f"DELETE FROM duplicate_items WHERE media_file_id IN ({ph})",
                     file_ids,
                 )
-
-                # Step 4 — null action_ledger FK (preserve rename/move history)
                 conn.execute(
                     f"UPDATE action_ledger SET media_file_id = NULL "
                     f"WHERE media_file_id IN ({ph})",
                     file_ids,
                 )
 
-            # Step 5 — now safe to delete media_files
             conn.execute(
                 "DELETE FROM media_files WHERE directory_id = ?", (dir_id,)
             )
-
-            # Step 6 — clean up orphan duplicate_groups
             conn.execute(
                 """
                 DELETE FROM duplicate_groups
@@ -224,11 +253,6 @@ class ScannerView(QWidget):
                 """
             )
 
-            # Step 7 — identify truly orphaned entities:
-            #   an entity is orphaned only when NO media_files row (including
-            #   soft-deleted rows with removed_at set) still references it.
-            #   Using removed_at IS NULL alone caused FK errors because soft-
-            #   deleted files kept their entity_id after the entity was gone.
             orphan_entity_ids = [
                 r["id"] for r in conn.execute(
                     """
@@ -243,29 +267,21 @@ class ScannerView(QWidget):
 
             if orphan_entity_ids:
                 eph = ",".join("?" * len(orphan_entity_ids))
-
-                # Step 8 — delete episode rows for orphaned entities BEFORE
-                #   deleting the entities themselves (episodes.entity_id FK,
-                #   no ON DELETE CASCADE in schema).
                 conn.execute(
                     f"DELETE FROM episodes WHERE entity_id IN ({eph})",
                     orphan_entity_ids,
                 )
-
-                # Step 9 — now safe to delete orphan entities
                 conn.execute(
                     f"DELETE FROM media_entities WHERE id IN ({eph})",
                     orphan_entity_ids,
                 )
 
-            # Step 10 — delete scan_runs (FK → directories), then the directory
             conn.execute("DELETE FROM scan_runs WHERE directory_id = ?", (dir_id,))
             conn.execute("DELETE FROM directories WHERE id = ?", (dir_id,))
 
         self._refresh_dirs_list()
         self.status_label.setText(f"Removed: {path}")
 
-        # Notify all views to refresh
         from PySide6.QtWidgets import QApplication
         main_win = QApplication.instance().activeWindow()
         if main_win and hasattr(main_win, "stack"):
@@ -292,22 +308,47 @@ class ScannerView(QWidget):
             self.status_label.setText("Cancelling scan...")
             return
 
-        path = self.path_input.text().strip()
-        if not path:
+        raw = self.path_input.text().strip()
+        if not raw:
             QMessageBox.warning(self, "Missing folder", "Choose a directory first.")
             return
 
+        # Support multiple paths joined by os.pathsep (from browse_directory)
+        paths = [p.strip() for p in raw.split(os.pathsep) if p.strip()]
         library_type = self.type_combo.currentText()
-        self.directories_repo.add_directory(path, library_type)
-        directories = self.directories_repo.list_directories()
-        match = next((d for d in directories if d["path"] == path), None)
-        if not match:
-            QMessageBox.critical(self, "Error", "Failed to register directory.")
+
+        # Register all selected directories first
+        registered = []
+        for path in paths:
+            self.directories_repo.add_directory(path, library_type)
+            directories = self.directories_repo.list_directories()
+            match = next((d for d in directories if d["path"] == path), None)
+            if match:
+                registered.append((match["id"], path))
+            else:
+                QMessageBox.critical(self, "Error", f"Failed to register directory: {path}")
+
+        if not registered:
             return
 
         self.path_input.clear()
         self._refresh_dirs_list()
-        self._start_scan(match["id"], path)
+
+        # Start scan for the first registered directory;
+        # subsequent directories can be rescanned from the list.
+        dir_id, first_path = registered[0]
+        self._start_scan(dir_id, first_path)
+
+        if len(registered) > 1:
+            remaining = ", ".join(p for _, p in registered[1:])
+            QMessageBox.information(
+                self, "Multiple Folders Added",
+                f"{len(registered)} folders registered.\n\n"
+                f"Scanning: {first_path}\n\n"
+                f"To scan the remaining folders, select each one in the "
+                f"Registered Directories list and click Rescan Selected.\n\n"
+                f"Remaining: {remaining}"
+            )
 
     def _start_scan(self, directory_id: int, path: str) -> None:
         name_excl, path_excl = self._get_exclusions()

@@ -11,6 +11,22 @@ def _fmt_storage(bytes_total: float) -> str:
     return f"{gb:.1f} GB"
 
 
+def _fmt_watch_hours(total_seconds: float) -> str:
+    """Return a human-readable watch-time string.
+
+    <  60 min  → "N min"
+    <  1000 h  → "1,234 h"
+    >= 1000 h  → "1.2k h"
+    """
+    minutes = total_seconds / 60
+    hours   = total_seconds / 3600
+    if hours < 1.0:
+        return f"{int(minutes)} min"
+    if hours < 1000:
+        return f"{int(hours):,} h"
+    return f"{hours / 1000:.1f}k h"
+
+
 class DashboardService:
 
     def library_overview(self) -> dict:
@@ -35,7 +51,8 @@ class DashboardService:
             return {
                 "total_files": 0, "total_movies": 0, "total_shows": 0,
                 "total_episodes": 0, "unmatched": 0,
-                "storage_gb": 0.0, "storage_display": "0 GB", "watch_hours": 0.0,
+                "storage_gb": 0.0, "storage_display": "0 GB",
+                "watch_hours": 0.0, "watch_display": "0 min",
             }
 
         total_files    = int(len(df))
@@ -44,7 +61,8 @@ class DashboardService:
         unmatched      = int(df["media_type"].isna().sum())
         total_bytes    = float(df["file_size_bytes"].fillna(0).sum())
         storage_gb     = total_bytes / (1024 ** 3)
-        watch_hours    = float(df["duration_seconds"].fillna(0).sum() / 3600)
+        total_seconds  = float(df["duration_seconds"].fillna(0).sum())
+        watch_hours    = total_seconds / 3600
 
         with get_connection() as conn:
             shows_df = pd.read_sql_query(
@@ -62,16 +80,11 @@ class DashboardService:
             "storage_gb":       round(storage_gb, 2),
             "storage_display":  _fmt_storage(total_bytes),
             "watch_hours":      round(watch_hours, 2),
+            "watch_display":    _fmt_watch_hours(total_seconds),
         }
 
     def shows_completion(self) -> dict:
-        """Return counts of Complete / Partial / Not Started shows.
-
-        A show is:
-          - Complete   : 0 missing episodes
-          - Partial    : some missing, some present
-          - Not Started: ALL episodes missing (or no episode rows at all)
-        """
+        """Return counts of Complete / Partial / Not Started shows."""
         with get_connection() as conn:
             rows = conn.execute(
                 """

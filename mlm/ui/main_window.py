@@ -250,10 +250,15 @@ class _TitleBar(QWidget):
         lay.addWidget(title)
         lay.addStretch()
 
+        # Use plain ASCII symbols that render reliably on all platforms
+        # without requiring Segoe UI Symbol or any icon font.
+        # -  (U+002D hyphen-minus)  → minimise
+        # [] (two chars)            → maximise / restore
+        # x  (lowercase x)         → close
         for sym, name, slot in (
-            ("─", "min",   win.showMinimized),
-            ("□", "max",   self._toggle_max),
-            ("✕", "close", win.close),
+            ("-",  "min",   win.showMinimized),
+            ("[]", "max",   self._toggle_max),
+            ("x",  "close", win.close),
         ):
             btn = QPushButton(sym)
             btn.setObjectName(f"wc_{name}")
@@ -394,12 +399,11 @@ class MainWindow(QMainWindow):
         self._row_height = 20 if density == "compact" else 28
         self._apply_row_density()
 
-        # Wire the corrupted-folders badge: connect HealthView panel signal
+        # Wire the corrupted-folders badge
         health_view: HealthView = self.stack.widget(_HEALTH_NAV_INDEX)
         health_view.corrupted_panel.folder_count_changed.connect(
             self._sidebar.set_health_badge
         )
-        # Initialise badge from current DB state (no scan needed)
         self._sidebar.set_health_badge(
             CorruptedFoldersService().total_corrupted_files()
         )
@@ -407,14 +411,7 @@ class MainWindow(QMainWindow):
         self._check_startup_health()
         self.switch_view(0)
 
-    # ──────────────────────────────────────────────────────────────────
     def _apply_row_density(self) -> None:
-        """Push the saved row-height preference to every table in the stack.
-
-        Each view may expose its primary table as any of the common attribute
-        names below.  We try each in order and set verticalHeader default
-        section size on the first match found.
-        """
         _TABLE_ATTRS = ("table", "_table", "table_view", "_table_view", "view")
         for i in range(self.stack.count()):
             view = self.stack.widget(i)
